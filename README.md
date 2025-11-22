@@ -26,7 +26,7 @@ This layer depends on:
 
 1. Clone this repository:
    ```bash
-   git clone https://github.com/pavan-gidaveer_henrg/meta-userapp-package.git
+   git clone https://github.com/Pavan-githu/meta-userapp-package.git
    ```
 
 2. Add the layer to your build:
@@ -75,7 +75,7 @@ This layer is primarily designed for:
 ## Contributing
 
 Please submit patches and issues to the project repository:
-https://github.com/pavan-gidaveer_henrg/meta-userapp-package.git
+https://github.com/Pavan-githu/meta-userapp-package.git
 
 ## Maintainer
 
