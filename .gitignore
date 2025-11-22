@@ -1,0 +1,22 @@
+# Backup files
+*~
+*.swp
+*.swo
+
+# Build artifacts
+*.pyc
+__pycache__/
+*.log
+
+# Temporary files
+.tmp/
+temp/
+
+# OS specific files
+.DS_Store
+Thumbs.db
+
+# Editor files
+.vscode/
+.idea/
+*.sublime-*

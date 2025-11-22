@@ -1,0 +1,52 @@
+This README file contains information on the contents of the meta-userapp-package layer.
+
+This layer provides user application packages for embedded Linux systems built with Yocto Project.
+
+Dependencies
+============
+
+  URI: git://git.yoctoproject.org/poky
+  branch: kirkstone
+
+  URI: git://git.openembedded.org/meta-openembedded
+  branch: kirkstone
+
+  URI: git://git.yoctoproject.org/meta-raspberrypi
+  branch: kirkstone
+
+Patches
+=======
+
+Please submit any patches against the meta-userapp-package layer to the project repository:
+https://github.com/pavan-gidaveer_henrg/meta-userapp-package.git
+
+Maintainer: Pavan Kumar <pavan.gidaveer@henrg.com>
+
+Table of Contents
+=================
+
+  I. Adding the meta-userapp-package layer to your build
+ II. Layer Contents
+III. Building Applications
+
+
+I. Adding the meta-userapp-package layer to your build
+======================================================
+
+Run 'bitbake-layers add-layer meta-userapp-package'
+
+II. Layer Contents
+==================
+
+This layer contains:
+- User application recipes with LED control and HTTPS server functionality
+- IoT Security Gateway implementation
+- Sample applications and examples
+
+III. Building Applications
+==========================
+
+To build the applications provided by this layer:
+- bitbake blink
+- bitbake iot-security-gateway (when available)
+- bitbake user-application (when available)
