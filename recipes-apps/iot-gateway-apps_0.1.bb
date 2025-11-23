@@ -7,7 +7,7 @@ DEPENDS = "libmicrohttpd gnutls"
 RDEPENDS:${PN} = "libmicrohttpd gnutls openssl"
 
 SRCREV = "${AUTOREV}"
-SRC_URI = "git://github.com/Pavan-githu/meta-userapp-package.git;branch=main;protocol=https"
+SRC_URI = "git://github.com/Pavan-githu/meta-userapp-package.git;branch=feature/ledblink;protocol=https"
 
 S = "${WORKDIR}/git"
 
