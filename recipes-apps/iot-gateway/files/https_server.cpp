@@ -89,9 +89,13 @@ bool HttpsServer::loadCertificate(const char* cert_file) {
     fseek(cert_fp, 0, SEEK_SET);
     
     cert_pem = new char[cert_size + 1];
-    fread(cert_pem, 1, cert_size, cert_fp);
+    size_t bytes_read = fread(cert_pem, 1, cert_size, cert_fp);
     cert_pem[cert_size] = '\0';
     fclose(cert_fp);
+    
+    if (bytes_read != (size_t)cert_size) {
+        std::cerr << "Warning: Read " << bytes_read << " bytes, expected " << cert_size << std::endl;
+    }
     
     return true;
 }
@@ -108,9 +112,13 @@ bool HttpsServer::loadKey(const char* key_file) {
     fseek(key_fp, 0, SEEK_SET);
     
     key_pem = new char[key_size + 1];
-    fread(key_pem, 1, key_size, key_fp);
+    size_t bytes_read = fread(key_pem, 1, key_size, key_fp);
     key_pem[key_size] = '\0';
     fclose(key_fp);
+    
+    if (bytes_read != (size_t)key_size) {
+        std::cerr << "Warning: Read " << bytes_read << " bytes, expected " << key_size << std::endl;
+    }
     
     return true;
 }
@@ -290,27 +298,4 @@ MHD_Result HttpsServer::answerToConnection(void* cls, struct MHD_Connection* con
     
     // Method not allowed
     return sendResponse(connection, "Method not allowed", MHD_HTTP_METHOD_NOT_ALLOWED);
-}
-
-// ============================================================================
-// Main function
-// ============================================================================
-
-int main(int argc, char** argv)
-{
-    const char* cert_file = "server.crt";
-    const char* key_file = "server.key";
-    
-    // Create server instance
-    HttpsServer server(8443);
-    
-    // Start the server
-    if (!server.start(cert_file, key_file)) {
-        return 1;
-    }
-    
-    std::cout << "Press Enter to stop the server..." << std::endl;
-    std::cin.get();
-    
-    return 0;
 }

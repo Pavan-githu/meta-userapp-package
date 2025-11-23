@@ -2,10 +2,6 @@
 #include <iostream>
 #include <fstream>
 #include <unistd.h>
-#include <csignal>
-#include <cstdlib>
-
-#define LED_PIN 17
 
 // ============================================================================
 // GPIO Class Implementation
@@ -71,57 +67,4 @@ void GPIO::cleanup() {
     setValue(false); // Turn off LED
     unexportGPIO();
     std::cout << "GPIO cleanup complete." << std::endl;
-}
-
-// ============================================================================
-// Main Program
-// ============================================================================
-
-// Global pointer for signal handler
-GPIO* led_gpio = nullptr;
-
-// Signal handler for graceful shutdown
-void signalHandler(int signum) {
-    std::cout << "\nInterrupted by user." << std::endl;
-    if (led_gpio) {
-        led_gpio->cleanup();
-    }
-    exit(0);
-}
-
-int main() {
-    // Initialize GPIO
-    GPIO led(LED_PIN);
-    led_gpio = &led;
-    
-    // Set up signal handler
-    signal(SIGINT, signalHandler);
-    signal(SIGTERM, signalHandler);
-    
-    // Setup GPIO
-    if (!led.setup()) {
-        std::cerr << "Failed to setup GPIO. Make sure you have proper permissions." << std::endl;
-        std::cerr << "Try running with sudo or add user to gpio group." << std::endl;
-        return 1;
-    }
-    
-    std::cout << "Starting LED blink loop. Press Ctrl+C to stop." << std::endl;
-    
-    try {
-        while (true) {
-            led.setValue(true);
-            std::cout << "LED ON" << std::endl;
-            sleep(1);
-            
-            led.setValue(false);
-            std::cout << "LED OFF" << std::endl;
-            sleep(1);
-        }
-    } catch (const std::exception& e) {
-        std::cerr << "Error: " << e.what() << std::endl;
-        led.cleanup();
-        return 1;
-    }
-    
-    return 0;
 }
