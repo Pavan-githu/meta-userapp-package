@@ -1,6 +1,11 @@
 #include "https_server.h"
 #include <iostream>
 #include <gnutls/gnutls.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <ifaddrs.h>
+#include <unistd.h>
 
 // ============================================================================
 // UploadData Implementation
@@ -57,9 +62,9 @@ void ConnectionInfo::createUploadData() {
 // HttpsServer Implementation
 // ============================================================================
 
-HttpsServer::HttpsServer(int server_port) 
+HttpsServer::HttpsServer(int server_port, const std::string& bind_addr) 
     : daemon(nullptr), cert_pem(nullptr), key_pem(nullptr), 
-      port(server_port), running(false) {}
+      port(server_port), running(false), bind_address(bind_addr) {}
 
 HttpsServer::~HttpsServer() {
     stop();
@@ -123,6 +128,44 @@ bool HttpsServer::loadKey(const char* key_file) {
     return true;
 }
 
+std::string HttpsServer::getLocalIPAddress() {
+    struct ifaddrs *ifaddr, *ifa;
+    char host[NI_MAXHOST];
+    std::string ip_address = "127.0.0.1";
+    
+    if (getifaddrs(&ifaddr) == -1) {
+        std::cerr << "Failed to get network interfaces" << std::endl;
+        return ip_address;
+    }
+    
+    // Iterate through network interfaces
+    for (ifa = ifaddr; ifa != nullptr; ifa = ifa->ifa_next) {
+        if (ifa->ifa_addr == nullptr)
+            continue;
+        
+        // Check for IPv4 address
+        if (ifa->ifa_addr->sa_family == AF_INET) {
+            int s = getnameinfo(ifa->ifa_addr, sizeof(struct sockaddr_in),
+                               host, NI_MAXHOST, nullptr, 0, NI_NUMERICHOST);
+            
+            if (s == 0) {
+                std::string temp_ip = host;
+                // Skip loopback, prefer eth0 or wlan0
+                if (temp_ip != "127.0.0.1" && 
+                    (strstr(ifa->ifa_name, "eth") != nullptr || 
+                     strstr(ifa->ifa_name, "wlan") != nullptr ||
+                     strstr(ifa->ifa_name, "en") != nullptr)) {
+                    ip_address = temp_ip;
+                    break;
+                }
+            }
+        }
+    }
+    
+    freeifaddrs(ifaddr);
+    return ip_address;
+}
+
 bool HttpsServer::start(const char* cert_file, const char* key_file) {
     if (running) {
         std::cerr << "Server is already running" << std::endl;
@@ -161,8 +204,25 @@ bool HttpsServer::start(const char* cert_file, const char* key_file) {
     }
     
     running = true;
-    std::cout << "HTTPS server running on https://localhost:" << port << std::endl;
-    std::cout << "POST files to https://localhost:" << port << "/upload" << std::endl;
+    
+    std::string local_ip = getLocalIPAddress();
+    
+    std::cout << "\n========================================" << std::endl;
+    std::cout << "HTTPS Server Started Successfully!" << std::endl;
+    std::cout << "========================================" << std::endl;
+    std::cout << "Binding address: " << bind_address << std::endl;
+    std::cout << "Port: " << port << std::endl;
+    std::cout << "\nAccess URLs:" << std::endl;
+    std::cout << "  Local:    https://localhost:" << port << std::endl;
+    std::cout << "  Network:  https://" << local_ip << ":" << port << std::endl;
+    std::cout << "\nEndpoints:" << std::endl;
+    std::cout << "  Upload:   POST https://" << local_ip << ":" << port << "/upload" << std::endl;
+    std::cout << "  Web UI:   GET  https://" << local_ip << ":" << port << "/" << std::endl;
+    std::cout << "\n⚠️  For PUBLIC internet access:" << std::endl;
+    std::cout << "  1. Configure port forwarding on your router" << std::endl;
+    std::cout << "  2. Forward external port " << port << " to " << local_ip << ":" << port << std::endl;
+    std::cout << "  3. Use your public IP or setup Dynamic DNS" << std::endl;
+    std::cout << "========================================\n" << std::endl;
     
     return true;
 }
@@ -288,11 +348,14 @@ MHD_Result HttpsServer::answerToConnection(void* cls, struct MHD_Connection* con
     
     // Handle POST upload
     if (std::strcmp(method, "POST") == 0 && std::strcmp(url, "/upload") == 0) {
+        //Handling POST upload request... Print to linux terminal
+        std::cout << "Handling POST upload request..." << std::endl;
         return handlePostUpload(connection, con_info, upload_data, upload_data_size);
     }
     
     // Handle GET or other methods
     if (std::strcmp(method, "GET") == 0) {
+        std::cout << "Handling GET request for URL: " << url << std::endl;
         return handleGetRequest(connection, url);
     }
     

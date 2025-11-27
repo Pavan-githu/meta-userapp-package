@@ -1,0 +1,16 @@
+[Unit]
+Description=IoT Gateway Application with WiFi Setup
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/iot-gateway
+Restart=on-failure
+RestartSec=10
+StandardInput=tty
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

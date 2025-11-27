@@ -4,14 +4,17 @@ LICENSE = "MIT"
 LIC_FILES_CHKSUM = "file://${COMMON_LICENSE_DIR}/MIT;md5=0835ade698e0bcf8506ecda2f7b4f302"
 
 DEPENDS = "libmicrohttpd gnutls"
-RDEPENDS:${PN} = "libmicrohttpd gnutls openssl"
+RDEPENDS:${PN} = "libmicrohttpd gnutls openssl wireless-tools iw wpa-supplicant"
 
 SRCREV = "${AUTOREV}"
 SRC_URI = "git://github.com/Pavan-githu/meta-userapp-package.git;branch=feature/ledblink;protocol=https"
 
 S = "${WORKDIR}/git"
 
-inherit pkgconfig
+inherit pkgconfig systemd
+
+SYSTEMD_SERVICE:${PN} = "iot-gateway.service"
+SYSTEMD_AUTO_ENABLE = "enable"
 
 do_compile() {
     # Compile unified IoT gateway application
@@ -19,8 +22,9 @@ do_compile() {
     ${CXX} ${CXXFLAGS} -std=c++11 -pthread -c blink.cpp -o blink.o
     ${CXX} ${CXXFLAGS} -std=c++11 -pthread -c https_server.cpp -o https_server.o
     ${CXX} ${CXXFLAGS} -std=c++11 -pthread -c certificate.cpp -o certificate.o
+    ${CXX} ${CXXFLAGS} -std=c++11 -pthread -c wifi_manager.cpp -o wifi_manager.o
     ${CXX} ${CXXFLAGS} -std=c++11 -pthread -c main.cpp -o main.o
-    ${CXX} ${CXXFLAGS} -pthread -o iot-gateway main.o blink.o https_server.o certificate.o \
+    ${CXX} ${CXXFLAGS} -pthread -o iot-gateway main.o blink.o https_server.o certificate.o wifi_manager.o \
         ${LDFLAGS} -lmicrohttpd -lgnutls
 }
 
@@ -31,7 +35,12 @@ do_install() {
     
     # Install configuration directory for certificates
     install -d ${D}${sysconfdir}/https-server
+    
+    # Install systemd service
+    install -d ${D}${systemd_system_unitdir}
+    install -m 0644 ${S}/recipes-apps/iot-gateway/files/iot-gateway.service ${D}${systemd_system_unitdir}/
 }
 
 FILES:${PN} += "${bindir}/iot-gateway"
 FILES:${PN} += "${sysconfdir}/https-server"
+FILES:${PN} += "${systemd_system_unitdir}/iot-gateway.service"

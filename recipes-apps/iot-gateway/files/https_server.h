@@ -58,15 +58,17 @@ private:
     char* cert_pem;
     char* key_pem;
     int port;
-    bool running;
+    bool running = false;
+    std::string bind_address;
     
     // Private methods
     bool loadCertificate(const char* cert_file);
     bool loadKey(const char* key_file);
     void cleanup();
+    std::string getLocalIPAddress();
 
 public:
-    HttpsServer(int server_port = 8443);
+    HttpsServer(int server_port = 8443, const std::string& bind_addr = "0.0.0.0");
     ~HttpsServer();
     
     // Prevent copying
