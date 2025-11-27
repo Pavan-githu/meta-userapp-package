@@ -82,7 +82,7 @@ bool WiFiManager::scanNetworks() {
     
     // Trigger scan
     std::string output;
-    std::string cmd = "iwlist " + interface_name + " scan";
+    std::string cmd = "iw " + interface_name + " scan";
     if (!executeCommand(cmd, output)) {
         std::cerr << "Failed to scan networks. Try running with sudo." << std::endl;
         return false;
@@ -97,24 +97,27 @@ bool WiFiManager::scanNetworks() {
     std::string security = "Open";
     
     while (std::getline(iss, line)) {
-        // Parse SSID
-        if (line.find("ESSID:") != std::string::npos) {
-            size_t start = line.find("\"");
-            size_t end = line.rfind("\"");
-            if (start != std::string::npos && end != std::string::npos && end > start) {
-                current_ssid = line.substr(start + 1, end - start - 1);
+        // Parse SSID (iw format: "SSID: network_name")
+        if (line.find("SSID:") != std::string::npos) {
+            size_t pos = line.find("SSID:");
+            if (pos != std::string::npos) {
+                current_ssid = line.substr(pos + 6);
+                // Trim whitespace
+                current_ssid.erase(0, current_ssid.find_first_not_of(" \t"));
+                current_ssid.erase(current_ssid.find_last_not_of(" \t\r\n") + 1);
             }
         }
-        // Parse signal quality
-        else if (line.find("Quality=") != std::string::npos) {
-            size_t pos = line.find("Quality=");
+        // Parse signal strength (iw format: "signal: -XX.00 dBm")
+        else if (line.find("signal:") != std::string::npos) {
+            size_t pos = line.find("signal:");
             if (pos != std::string::npos) {
-                std::string quality_str = line.substr(pos + 8);
-                size_t slash = quality_str.find("/");
-                if (slash != std::string::npos) {
-                    int current = std::stoi(quality_str.substr(0, slash));
-                    int max = std::stoi(quality_str.substr(slash + 1));
-                    signal_strength = (current * 100) / max;
+                std::string signal_str = line.substr(pos + 7);
+                size_t dbm_pos = signal_str.find("dBm");
+                if (dbm_pos != std::string::npos) {
+                    float signal_dbm = std::stof(signal_str.substr(0, dbm_pos));
+                    // Convert dBm to percentage (approximate)
+                    // -30 dBm = 100%, -90 dBm = 0%
+                    signal_strength = std::max(0, std::min(100, (int)((signal_dbm + 90) * 100 / 60)));
                 }
             }
         }
@@ -244,13 +247,13 @@ bool WiFiManager::connectToNetwork(const std::string& ssid, const std::string& p
 
 bool WiFiManager::isConnected() {
     std::string output;
-    std::string cmd = "iwconfig " + interface_name + " | grep 'ESSID' | grep -v 'off/any'";
+    std::string cmd = "iw " + interface_name + " link | grep 'Connected'";
     return executeCommand(cmd, output) && !output.empty();
 }
 
 std::string WiFiManager::getCurrentSSID() {
     std::string output;
-    std::string cmd = "iwconfig " + interface_name + " | grep 'ESSID' | awk -F'\"' '{print $2}'";
+    std::string cmd = "iw " + interface_name + " link | grep 'SSID' | awk '{print $2}'";
     executeCommand(cmd, output);
     
     // Remove newline

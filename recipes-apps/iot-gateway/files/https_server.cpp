@@ -6,6 +6,7 @@
 #include <arpa/inet.h>
 #include <ifaddrs.h>
 #include <unistd.h>
+#include <netdb.h>
 
 // ============================================================================
 // UploadData Implementation

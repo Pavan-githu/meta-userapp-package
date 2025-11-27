@@ -4,7 +4,7 @@ LICENSE = "MIT"
 LIC_FILES_CHKSUM = "file://${COMMON_LICENSE_DIR}/MIT;md5=0835ade698e0bcf8506ecda2f7b4f302"
 
 DEPENDS = "libmicrohttpd gnutls"
-RDEPENDS:${PN} = "libmicrohttpd gnutls openssl wireless-tools iw wpa-supplicant"
+RDEPENDS:${PN} = "libmicrohttpd gnutls openssl iw wpa-supplicant"
 
 SRCREV = "${AUTOREV}"
 SRC_URI = "git://github.com/Pavan-githu/meta-userapp-package.git;branch=feature/ledblink;protocol=https"
