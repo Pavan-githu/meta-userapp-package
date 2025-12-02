@@ -8,6 +8,10 @@
 #include <unistd.h>
 #include <netdb.h>
 
+// Global buffer for uploaded data
+char* uploaded_buffer = nullptr;
+size_t uploaded_buffer_size = 0;
+
 // ============================================================================
 // UploadData Implementation
 // ============================================================================
@@ -144,6 +148,7 @@ std::string HttpsServer::getLocalIPAddress() {
         if (ifa->ifa_addr == nullptr)
             continue;
         
+        std::cout << "Interface: " << ifa->ifa_name << " | Address Family: " << ifa->ifa_addr->sa_family << std::endl;
         // Check for IPv4 address
         if (ifa->ifa_addr->sa_family == AF_INET) {
             int s = getnameinfo(ifa->ifa_addr, sizeof(struct sockaddr_in),
@@ -155,7 +160,13 @@ std::string HttpsServer::getLocalIPAddress() {
                 if (temp_ip != "127.0.0.1" && 
                     (strstr(ifa->ifa_name, "eth") != nullptr || 
                      strstr(ifa->ifa_name, "wlan") != nullptr ||
+                     strstr(ifa->ifa_name, "eth0") != nullptr ||
+                     strstr(ifa->ifa_name, "eth1") != nullptr ||
+                     strstr(ifa->ifa_name, "wlan0") != nullptr ||
+                     strstr(ifa->ifa_name, "wlan1") != nullptr ||
                      strstr(ifa->ifa_name, "en") != nullptr)) {
+                    //print found IP
+                    std::cout << "Selected IP: " << temp_ip << " from interface: " << ifa->ifa_name << std::endl;
                     ip_address = temp_ip;
                     break;
                 }
@@ -288,8 +299,19 @@ MHD_Result HttpsServer::handlePostUpload(struct MHD_Connection* connection,
             std::cout << "Data stored at memory address: " 
                      << static_cast<void*>(upload->getData()) << std::endl;
             
-            // You can process the uploaded data here
-            // For example, write to file or further processing
+            // Free previous global buffer if exists
+            if (uploaded_buffer != nullptr) {
+                delete[] uploaded_buffer;
+                uploaded_buffer = nullptr;
+            }
+            
+            // Store uploaded data in global buffer
+            uploaded_buffer_size = upload->getSize();
+            uploaded_buffer = new char[uploaded_buffer_size];
+            std::memcpy(uploaded_buffer, upload->getData(), uploaded_buffer_size);
+            
+            std::cout << "Data copied to global buffer (size: " << uploaded_buffer_size << " bytes)" << std::endl;
+            // Global buffer persists and can be accessed by other functions
         } else {
             response_str = "No data received\n";
         }
@@ -322,7 +344,9 @@ MHD_Result HttpsServer::sendResponse(struct MHD_Connection* connection,
         const_cast<char*>(content.c_str()),
         MHD_RESPMEM_MUST_COPY
     );
-    
+    // print response creation
+    std::cout << "Sending response with status code: " << status_code << std::endl;
+
     MHD_Result ret = MHD_queue_response(connection, status_code, response);
     MHD_destroy_response(response);
     return ret;
@@ -338,6 +362,8 @@ MHD_Result HttpsServer::answerToConnection(void* cls, struct MHD_Connection* con
         ConnectionInfo* con_info = new ConnectionInfo();
         
         if (std::strcmp(method, "POST") == 0) {
+            // Mark as POST request
+            std::cout << "Marking connection as POST request" << std::endl;
             con_info->setIsPost(true);
         }
         

@@ -140,6 +140,13 @@ int main(int argc, char** argv) {
     std::string cert_directory = "/etc/https-server";
     CertificateManager cert_manager(cert_directory);
     
+    // Create certificate directory if it doesn't exist
+    if (!cert_manager.setupCertificateDirectory()) {
+        std::cerr << "Failed to create certificate directory: " << cert_directory << std::endl;
+        std::cerr << "Make sure you have proper permissions (try running with sudo)." << std::endl;
+        return 1;
+    }
+    
     // Check if certificates exist, if not generate them
     if (!cert_manager.certificatesExist()) {
         std::cout << "\nCertificates not found. Generating new certificates..." << std::endl;
