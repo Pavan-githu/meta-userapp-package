@@ -1,70 +1,78 @@
 #include "blink.h"
 #include <iostream>
-#include <fstream>
-#include <unistd.h>
+#include <gpiod.h>
 
 // ============================================================================
-// GPIO Class Implementation
+// GPIO Class Implementation using libgpiod (modern Linux GPIO API)
 // ============================================================================
 
-GPIO::GPIO(int gpio_pin) : pin(gpio_pin) {
-    gpio_path = "/sys/class/gpio/gpio" + std::to_string(pin);
+GPIO::GPIO(int gpio_pin) : pin(gpio_pin), chip(nullptr), line(nullptr) {
 }
 
-bool GPIO::writeToFile(const std::string& path, const std::string& value) {
-    std::ofstream file(path);
-    if (!file.is_open()) {
-        std::cerr << "Error: Unable to open " << path << std::endl;
-        return false;
-    }
-    file << value;
-    file.close();
-    return true;
-}
-
-bool GPIO::exportGPIO() {
-    // Check if already exported
-    std::string check_path = "/sys/class/gpio/gpio" + std::to_string(pin);
-    std::ifstream check(check_path);
-    if (check.good()) {
-        return true; // Already exported
-    }
-    
-    return writeToFile("/sys/class/gpio/export", std::to_string(pin));
-}
-
-bool GPIO::unexportGPIO() {
-    return writeToFile("/sys/class/gpio/unexport", std::to_string(pin));
+GPIO::~GPIO() {
+    cleanup();
 }
 
 bool GPIO::setup() {
-    std::cout << "Setting up GPIO..." << std::endl;
+    std::cout << "Setting up GPIO with libgpiod..." << std::endl;
     
-    if (!exportGPIO()) {
-        std::cerr << "Failed to export GPIO " << pin << std::endl;
+    // Open GPIO chip (gpiochip0 for Raspberry Pi)
+    chip = gpiod_chip_open("/dev/gpiochip0");
+    if (!chip) {
+        std::cerr << "Failed to open GPIO chip" << std::endl;
         return false;
     }
     
-    // Small delay to ensure export completes
-    usleep(100000);
-    
-    // Set direction to output
-    if (!writeToFile(gpio_path + "/direction", "out")) {
-        std::cerr << "Failed to set GPIO direction" << std::endl;
+    // Get GPIO line
+    line = gpiod_chip_get_line(chip, pin);
+    if (!line) {
+        std::cerr << "Failed to get GPIO line " << pin << std::endl;
+        gpiod_chip_close(chip);
+        chip = nullptr;
         return false;
     }
     
-    std::cout << "GPIO " << pin << " set as OUTPUT." << std::endl;
+    // Request line as output
+    if (gpiod_line_request_output(line, "iot-gateway-led", 0) < 0) {
+        std::cerr << "Failed to request GPIO " << pin << " as output" << std::endl;
+        gpiod_chip_close(chip);
+        chip = nullptr;
+        line = nullptr;
+        return false;
+    }
+    
+    std::cout << "GPIO " << pin << " set as OUTPUT using libgpiod." << std::endl;
     return true;
 }
 
 bool GPIO::setValue(bool value) {
-    return writeToFile(gpio_path + "/value", value ? "1" : "0");
+    if (!line) {
+        std::cerr << "GPIO line not initialized" << std::endl;
+        return false;
+    }
+    
+    // Set GPIO value (1 = HIGH, 0 = LOW)
+    if (gpiod_line_set_value(line, value ? 1 : 0) < 0) {
+        std::cerr << "Failed to set GPIO " << pin << " value" << std::endl;
+        return false;
+    }
+    
+    return true;
 }
 
 void GPIO::cleanup() {
     std::cout << "Cleaning up GPIO..." << std::endl;
-    setValue(false); // Turn off LED
-    unexportGPIO();
+    
+    if (line) {
+        setValue(false); // Turn off LED
+        gpiod_line_release(line);
+        line = nullptr;
+    }
+    
+    if (chip) {
+        gpiod_chip_close(chip);
+        chip = nullptr;
+    }
+    
     std::cout << "GPIO cleanup complete." << std::endl;
 }

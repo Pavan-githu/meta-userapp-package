@@ -1,22 +1,21 @@
 #ifndef BLINK_H
 #define BLINK_H
 
-#include <string>
+#include <gpiod.h>
 
-// GPIO control class for Raspberry Pi
+// GPIO control class using libgpiod (modern Linux GPIO API)
 class GPIO {
 private:
     int pin;
-    std::string gpio_path;
-    
-    // Private helper methods
-    bool writeToFile(const std::string& path, const std::string& value);
-    bool exportGPIO();
-    bool unexportGPIO();
+    struct gpiod_chip *chip;
+    struct gpiod_line *line;
     
 public:
     // Constructor
     GPIO(int gpio_pin);
+    
+    // Destructor
+    ~GPIO();
     
     // Setup GPIO pin
     bool setup();

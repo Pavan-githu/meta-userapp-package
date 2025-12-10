@@ -44,11 +44,11 @@ void* ledBlinkThread(void* arg) {
     while (running) {
         led.setValue(true);
         std::cout << "[LED] ON" << std::endl;
-        sleep(1);
+        sleep(5);
         
         led.setValue(false);
         std::cout << "[LED] OFF" << std::endl;
-        sleep(1);
+        sleep(5);
     }
     
     led.cleanup();
@@ -136,6 +136,18 @@ int main(int argc, char** argv) {
     signal(SIGINT, signalHandler);
     signal(SIGTERM, signalHandler);
     
+    // Launch LED thread first (independent of certificates)
+    std::cout << "\n--- Starting LED Blink Thread (pthread) ---" << std::endl;
+    
+    pthread_t led_thread;
+    
+    // Create LED blink thread
+    if (pthread_create(&led_thread, NULL, ledBlinkThread, NULL) != 0) {
+        std::cerr << "Failed to create LED thread" << std::endl;
+        return 1;
+    }
+    std::cout << "[pthread] LED thread created" << std::endl;
+    
     // Certificate management
     std::string cert_directory = "/etc/https-server";
     CertificateManager cert_manager(cert_directory);
@@ -163,17 +175,10 @@ int main(int argc, char** argv) {
     std::string cert_file = cert_manager.getServerCertPath();
     std::string key_file = cert_manager.getServerKeyPath();
     
-    // Launch all three service threads using pthread
-    std::cout << "\n--- Starting Service Threads (pthread) ---" << std::endl;
+    // Launch remaining service threads using pthread
+    std::cout << "\n--- Starting Network Service Threads (pthread) ---" << std::endl;
     
-    pthread_t led_thread, wifi_thread, https_thread;
-    
-    // Create LED blink thread
-    if (pthread_create(&led_thread, NULL, ledBlinkThread, NULL) != 0) {
-        std::cerr << "Failed to create LED thread" << std::endl;
-        return 1;
-    }
-    std::cout << "[pthread] LED thread created" << std::endl;
+    pthread_t wifi_thread, https_thread;
     
     // Create WiFi manager thread
     if (pthread_create(&wifi_thread, NULL, wifiManagerThread, NULL) != 0) {
