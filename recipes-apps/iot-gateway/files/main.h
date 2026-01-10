@@ -19,6 +19,7 @@ struct HttpsThreadArgs {
 extern GPIO* led_gpio;
 extern HttpsServer* server;
 extern std::atomic<bool> running;
+extern std::atomic<bool> pause_led;
 
 // Global certificate paths (set by certificate thread)
 extern std::string global_cert_file;

@@ -12,6 +12,7 @@
 GPIO* led_gpio = nullptr;
 HttpsServer* server = nullptr;
 std::atomic<bool> running(true);
+std::atomic<bool> pause_led(false);  // Control LED blinking during user input
 
 // Global certificate paths
 std::string global_cert_file;
@@ -47,13 +48,20 @@ void* ledBlinkThread(void* arg) {
     std::cout << "[LED Thread] Started on GPIO " << LED_PIN << std::endl;
     
     while (running) {
-        led.setValue(true);
-        std::cout << "[LED] ON" << std::endl;
-        sleep(5);
-        
-        led.setValue(false);
-        std::cout << "[LED] OFF" << std::endl;
-        sleep(5);
+        // Check if LED should be paused (during user input)
+        if (!pause_led) {
+            led.setValue(true);
+            std::cout << "[LED] ON" << std::endl;
+            sleep(5);
+            
+            led.setValue(false);
+            std::cout << "[LED] OFF" << std::endl;
+            sleep(5);
+        } else {
+            // Keep LED off during pause
+            led.setValue(false);
+            sleep(1);
+        }
     }
     
     led.cleanup();
@@ -73,6 +81,11 @@ void* wifiManagerThread(void* arg) {
         std::cout << "[WiFi] IP Address: " << wifi_manager.getIPAddress() << std::endl;
     } else {
         std::cout << "[WiFi] Not connected to any network" << std::endl;
+        
+        // Pause LED during user input
+        pause_led = true;
+        sleep(1); // Give LED thread time to turn off
+        
         std::cout << "[WiFi] Do you want to setup WiFi? (y/n): ";
         char choice;
         std::cin >> choice;
@@ -84,6 +97,9 @@ void* wifiManagerThread(void* arg) {
         } else {
             std::cout << "[WiFi] Skipping setup. Server will be accessible only via Ethernet." << std::endl;
         }
+        
+        // Resume LED blinking
+        pause_led = false;
     }
     
     // Keep thread alive to monitor connection

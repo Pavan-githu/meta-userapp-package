@@ -2,6 +2,7 @@
 #include <iostream>
 #include <sstream>
 #include <fstream>
+#include <limits>
 #include <cstdlib>
 #include <cstring>
 #include <unistd.h>
@@ -189,6 +190,24 @@ void WiFiManager::displayNetworks() const {
 bool WiFiManager::saveNetworkConfig(const std::string& ssid, const std::string& password) {
     std::cout << "Saving network configuration..." << std::endl;
     
+    const std::string conf_path = "/etc/wpa_supplicant.conf";
+    
+    // Check if file exists, if not create with basic config
+    std::ifstream check_file(conf_path);
+    bool file_exists = check_file.good();
+    check_file.close();
+    
+    if (!file_exists) {
+        std::ofstream new_file(conf_path);
+        if (!new_file.is_open()) {
+            std::cerr << "Failed to create wpa_supplicant.conf. Try running with sudo." << std::endl;
+            return false;
+        }
+        new_file << "ctrl_interface=/var/run/wpa_supplicant\n";
+        new_file << "update_config=1\n\n";
+        new_file.close();
+    }
+    
     // Create wpa_supplicant configuration
     std::string config;
     if (password.empty()) {
@@ -202,11 +221,12 @@ bool WiFiManager::saveNetworkConfig(const std::string& ssid, const std::string& 
         config = "network={\n";
         config += "    ssid=\"" + ssid + "\"\n";
         config += "    psk=\"" + password + "\"\n";
+        config += "    key_mgmt=WPA-PSK\n";
         config += "}\n";
     }
     
     // Append to wpa_supplicant.conf
-    std::ofstream conf_file("/etc/wpa_supplicant/wpa_supplicant.conf", std::ios::app);
+    std::ofstream conf_file(conf_path, std::ios::app);
     if (!conf_file.is_open()) {
         std::cerr << "Failed to open wpa_supplicant.conf. Try running with sudo." << std::endl;
         return false;
@@ -237,30 +257,47 @@ bool WiFiManager::connectToNetwork(const std::string& ssid, const std::string& p
     
     // Start wpa_supplicant
     std::string cmd = "wpa_supplicant -B -i " + interface_name + 
-                     " -c /etc/wpa_supplicant/wpa_supplicant.conf";
+                     " -c /etc/wpa_supplicant.conf";
     if (!executeCommand(cmd, output)) {
         std::cerr << "Failed to start wpa_supplicant" << std::endl;
         return false;
     }
     
-    sleep(3); // Wait for connection
+    // Wait for connection with timeout
+    std::cout << "Waiting for connection" << std::flush;
+    int timeout = 15; // 15 seconds timeout
+    for (int i = 0; i < timeout; i++) {
+        sleep(1);
+        std::cout << "." << std::flush;
+        if (isConnected()) {
+            break;
+        }
+    }
+    std::cout << std::endl;
+    
+    // Check if connected
+    if (!isConnected()) {
+        std::cerr << "\n✗ Failed to connect to " << ssid << std::endl;
+        std::cerr << "Possible reasons:\n";
+        std::cerr << "  - Incorrect password\n";
+        std::cerr << "  - Signal too weak\n";
+        std::cerr << "  - Network configuration issue\n";
+        return false;
+    }
     
     // Get IP address via DHCP
-    std::cout << "Requesting IP address..." << std::endl;
-    cmd = "udhcpc -i " + interface_name;
+    std::cout << "Connected! Requesting IP address..." << std::endl;
+    cmd = "udhcpc -i " + interface_name + " 2>&1";
     executeCommand(cmd, output);
     
     sleep(2);
     
-    // Check if connected
-    if (isConnected()) {
-        std::cout << "\n✓ Successfully connected to " << ssid << std::endl;
-        std::cout << "IP Address: " << getIPAddress() << std::endl;
-        return true;
-    } else {
-        std::cerr << "✗ Failed to connect to " << ssid << std::endl;
-        return false;
-    }
+    // Final status
+    std::cout << "\n========================================" << std::endl;
+    std::cout << "✓ Successfully connected to " << ssid << std::endl;
+    std::cout << "IP Address: " << getIPAddress() << std::endl;
+    std::cout << "========================================\n" << std::endl;
+    return true;
 }
 
 bool WiFiManager::isConnected() {
@@ -351,8 +388,16 @@ bool WiFiManager::interactiveSetup() {
     std::string password;
     
     if (selected.encrypted) {
-        std::cout << "Enter password for " << selected.ssid << ": ";
-        std::cin >> password;
+        // Clear input buffer
+        std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
+        
+        std::cout << "\nEnter password for " << selected.ssid << ": ";
+        std::getline(std::cin, password);
+        
+        if (password.empty()) {
+            std::cerr << "Password cannot be empty for encrypted network" << std::endl;
+            return false;
+        }
     }
     
     // Connect
