@@ -13,6 +13,11 @@ GPIO* led_gpio = nullptr;
 HttpsServer* server = nullptr;
 std::atomic<bool> running(true);
 
+// Global certificate paths
+std::string global_cert_file;
+std::string global_key_file;
+std::atomic<bool> certificates_ready(false);
+
 // Signal handler for graceful shutdown
 void signalHandler(int signum) {
     std::cout << "\nShutting down..." << std::endl;
@@ -93,15 +98,73 @@ void* wifiManagerThread(void* arg) {
     pthread_exit(NULL);
 }
 
+// Thread function for certificate management
+void* certificateManagementThread(void* arg) {
+    std::cout << "[Certificate Thread] Started" << std::endl;
+    
+    // Certificate management
+    std::string cert_directory = "/etc/https-server";
+    CertificateManager cert_manager(cert_directory);
+    
+    // Create certificate directory if it doesn't exist
+    if (!cert_manager.setupCertificateDirectory()) {
+        std::cerr << "[Certificate] Failed to create certificate directory: " << cert_directory << std::endl;
+        std::cerr << "[Certificate] Make sure you have proper permissions (try running with sudo)." << std::endl;
+        certificates_ready = false;
+        pthread_exit(NULL);
+    }
+    
+    // Check if certificates exist, if not generate them
+    if (!cert_manager.certificatesExist()) {
+        std::cout << "[Certificate] Certificates not found. Generating new certificates..." << std::endl;
+        if (!cert_manager.generateAllCertificates()) {
+            std::cerr << "[Certificate] Failed to generate certificates" << std::endl;
+            std::cerr << "[Certificate] Make sure you have proper permissions and openssl is installed." << std::endl;
+            certificates_ready = false;
+            pthread_exit(NULL);
+        }
+        std::cout << "[Certificate] Certificates generated successfully!" << std::endl;
+    } else {
+        std::cout << "[Certificate] Certificates found in " << cert_directory << std::endl;
+    }
+    
+    // Get certificate paths and store globally
+    global_cert_file = cert_manager.getServerCertPath();
+    global_key_file = cert_manager.getServerKeyPath();
+    
+    std::cout << "[Certificate] Server cert: " << global_cert_file << std::endl;
+    std::cout << "[Certificate] Server key: " << global_key_file << std::endl;
+    std::cout << "[Certificate] Root CA: " << cert_manager.getRootCertPath() << std::endl;
+    std::cout << "[Certificate] Client cert: " << cert_manager.getClientCertPath() << std::endl;
+    std::cout << "[Certificate] Client key: " << cert_manager.getClientKeyPath() << std::endl;
+    
+    // Signal that certificates are ready
+    certificates_ready = true;
+    
+    std::cout << "[Certificate Thread] Completed successfully" << std::endl;
+    pthread_exit(NULL);
+}
+
 // Thread function for HTTPS server
 void* httpsServerThread(void* arg) {
     std::cout << "[HTTPS Thread] Started" << std::endl;
     
-    // Extract certificate paths from argument
-    HttpsThreadArgs* args = (HttpsThreadArgs*)arg;
-    std::string cert_file = args->cert_file;
-    std::string key_file = args->key_file;
-    delete args; // Free the allocated memory
+    // Wait for certificates to be ready
+    std::cout << "[HTTPS] Waiting for certificates..." << std::endl;
+    while (!certificates_ready && running) {
+        sleep(1);
+    }
+    
+    if (!certificates_ready) {
+        std::cerr << "[HTTPS] Certificates not available, cannot start server" << std::endl;
+        pthread_exit(NULL);
+    }
+    
+    std::cout << "[HTTPS] Certificates ready, starting server..." << std::endl;
+    
+    // Use global certificate paths
+    std::string cert_file = global_cert_file;
+    std::string key_file = global_key_file;
     
     HttpsServer https_server(8443);
     server = &https_server;
@@ -136,49 +199,24 @@ int main(int argc, char** argv) {
     signal(SIGINT, signalHandler);
     signal(SIGTERM, signalHandler);
     
-    // Launch LED thread first (independent of certificates)
-    std::cout << "\n--- Starting LED Blink Thread (pthread) ---" << std::endl;
+    // Launch all service threads using pthread
+    std::cout << "\n--- Starting Service Threads (pthread) ---" << std::endl;
     
-    pthread_t led_thread;
+    pthread_t led_thread, cert_thread, wifi_thread, https_thread;
     
-    // Create LED blink thread
+    // Create LED blink thread (independent of other services)
     if (pthread_create(&led_thread, NULL, ledBlinkThread, NULL) != 0) {
         std::cerr << "Failed to create LED thread" << std::endl;
         return 1;
     }
     std::cout << "[pthread] LED thread created" << std::endl;
     
-    // Certificate management
-    std::string cert_directory = "/etc/https-server";
-    CertificateManager cert_manager(cert_directory);
-    
-    // Create certificate directory if it doesn't exist
-    if (!cert_manager.setupCertificateDirectory()) {
-        std::cerr << "Failed to create certificate directory: " << cert_directory << std::endl;
-        std::cerr << "Make sure you have proper permissions (try running with sudo)." << std::endl;
+    // Create certificate management thread
+    if (pthread_create(&cert_thread, NULL, certificateManagementThread, NULL) != 0) {
+        std::cerr << "Failed to create certificate thread" << std::endl;
         return 1;
     }
-    
-    // Check if certificates exist, if not generate them
-    if (!cert_manager.certificatesExist()) {
-        std::cout << "\nCertificates not found. Generating new certificates..." << std::endl;
-        if (!cert_manager.generateAllCertificates()) {
-            std::cerr << "Failed to generate certificates" << std::endl;
-            std::cerr << "Make sure you have proper permissions and openssl is installed." << std::endl;
-            return 1;
-        }
-    } else {
-        std::cout << "\nCertificates found in " << cert_directory << std::endl;
-    }
-    
-    // Get certificate paths
-    std::string cert_file = cert_manager.getServerCertPath();
-    std::string key_file = cert_manager.getServerKeyPath();
-    
-    // Launch remaining service threads using pthread
-    std::cout << "\n--- Starting Network Service Threads (pthread) ---" << std::endl;
-    
-    pthread_t wifi_thread, https_thread;
+    std::cout << "[pthread] Certificate management thread created" << std::endl;
     
     // Create WiFi manager thread
     if (pthread_create(&wifi_thread, NULL, wifiManagerThread, NULL) != 0) {
@@ -187,11 +225,9 @@ int main(int argc, char** argv) {
     }
     std::cout << "[pthread] WiFi thread created" << std::endl;
     
-    // Create HTTPS server thread with certificate paths
-    HttpsThreadArgs* https_args = new HttpsThreadArgs{cert_file, key_file};
-    if (pthread_create(&https_thread, NULL, httpsServerThread, (void*)https_args) != 0) {
+    // Create HTTPS server thread (will wait for certificates internally)
+    if (pthread_create(&https_thread, NULL, httpsServerThread, NULL) != 0) {
         std::cerr << "Failed to create HTTPS thread" << std::endl;
-        delete https_args;
         return 1;
     }
     std::cout << "[pthread] HTTPS thread created" << std::endl;
@@ -199,17 +235,16 @@ int main(int argc, char** argv) {
     std::cout << "\n==================================================" << std::endl;
     std::cout << "  All services running in separate threads!" << std::endl;
     std::cout << "  - LED: Blinking on GPIO " << LED_PIN << std::endl;
+    std::cout << "  - Certificate: Management in progress" << std::endl;
     std::cout << "  - WiFi: Manager running" << std::endl;
-    std::cout << "  - HTTPS: Server on port 8443" << std::endl;
+    std::cout << "  - HTTPS: Server on port 8443 (waiting for certificates)" << std::endl;
     std::cout << "    * Upload: https://localhost:8443/upload" << std::endl;
-    std::cout << "    * Root CA: " << cert_manager.getRootCertPath() << std::endl;
-    std::cout << "    * Client cert: " << cert_manager.getClientCertPath() << std::endl;
-    std::cout << "    * Client key: " << cert_manager.getClientKeyPath() << std::endl;
     std::cout << "  Press Ctrl+C to stop all services" << std::endl;
     std::cout << "==================================================" << std::endl;
     
     // Wait for all threads to complete
     pthread_join(led_thread, NULL);
+    pthread_join(cert_thread, NULL);
     pthread_join(wifi_thread, NULL);
     pthread_join(https_thread, NULL);
     

@@ -20,6 +20,11 @@ extern GPIO* led_gpio;
 extern HttpsServer* server;
 extern std::atomic<bool> running;
 
+// Global certificate paths (set by certificate thread)
+extern std::string global_cert_file;
+extern std::string global_key_file;
+extern std::atomic<bool> certificates_ready;
+
 // Signal handler for graceful shutdown
 void signalHandler(int signum);
 
@@ -27,5 +32,6 @@ void signalHandler(int signum);
 void* ledBlinkThread(void* arg);
 void* wifiManagerThread(void* arg);
 void* httpsServerThread(void* arg);
+void* certificateManagementThread(void* arg);
 
 #endif // MAIN_H
