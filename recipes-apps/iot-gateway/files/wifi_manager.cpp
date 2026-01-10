@@ -97,8 +97,16 @@ bool WiFiManager::scanNetworks() {
     std::string security = "Open";
     
     while (std::getline(iss, line)) {
+        // Check for start of a new BSS (network) entry - save previous one if exists
+        if (line.find("BSS ") != std::string::npos && !current_ssid.empty()) {
+            available_networks.push_back(WiFiNetwork(current_ssid, signal_strength, encrypted, security));
+            current_ssid.clear();
+            signal_strength = 0;
+            encrypted = false;
+            security = "Open";
+        }
         // Parse SSID (iw format: "SSID: network_name")
-        if (line.find("SSID:") != std::string::npos) {
+        else if (line.find("SSID:") != std::string::npos) {
             size_t pos = line.find("SSID:");
             if (pos != std::string::npos) {
                 current_ssid = line.substr(pos + 6);
@@ -114,27 +122,21 @@ bool WiFiManager::scanNetworks() {
                 std::string signal_str = line.substr(pos + 7);
                 size_t dbm_pos = signal_str.find("dBm");
                 if (dbm_pos != std::string::npos) {
-                    float signal_dbm = std::stof(signal_str.substr(0, dbm_pos));
-                    // Convert dBm to percentage (approximate)
-                    // -30 dBm = 100%, -90 dBm = 0%
-                    signal_strength = std::max(0, std::min(100, (int)((signal_dbm + 90) * 100 / 60)));
+                    try {
+                        float signal_dbm = std::stof(signal_str.substr(0, dbm_pos));
+                        // Convert dBm to percentage (approximate)
+                        // -30 dBm = 100%, -90 dBm = 0%
+                        signal_strength = std::max(0, std::min(100, (int)((signal_dbm + 90) * 100 / 60)));
+                    } catch (...) {
+                        signal_strength = 0;
+                    }
                 }
             }
         }
-        // Parse encryption
-        else if (line.find("Encryption key:on") != std::string::npos) {
+        // Parse encryption - iw shows RSN, WPA
+        else if (line.find("RSN:") != std::string::npos || line.find("WPA:") != std::string::npos) {
             encrypted = true;
-        }
-        else if (line.find("IE: WPA") != std::string::npos) {
             security = "WPA/WPA2";
-        }
-        // End of a network entry
-        else if (line.find("Cell ") != std::string::npos && !current_ssid.empty()) {
-            available_networks.push_back(WiFiNetwork(current_ssid, signal_strength, encrypted, security));
-            current_ssid.clear();
-            signal_strength = 0;
-            encrypted = false;
-            security = "Open";
         }
     }
     
@@ -142,6 +144,22 @@ bool WiFiManager::scanNetworks() {
     if (!current_ssid.empty()) {
         available_networks.push_back(WiFiNetwork(current_ssid, signal_strength, encrypted, security));
     }
+    
+    // Remove duplicates (networks appear multiple times in scan)
+    std::vector<WiFiNetwork> unique_networks;
+    for (const auto& net : available_networks) {
+        bool found = false;
+        for (const auto& unique : unique_networks) {
+            if (unique.ssid == net.ssid) {
+                found = true;
+                break;
+            }
+        }
+        if (!found && !net.ssid.empty()) {
+            unique_networks.push_back(net);
+        }
+    }
+    available_networks = unique_networks;
     
     std::cout << "Found " << available_networks.size() << " networks" << std::endl;
     return !available_networks.empty();
