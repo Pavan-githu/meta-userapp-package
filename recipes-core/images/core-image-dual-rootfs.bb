@@ -17,7 +17,11 @@ IMAGE_INSTALL:append = " \
     openssh \
     wpa-supplicant \
     iw \
+    wireless-regdb \
 "
+
+# Remove conflicting package groups
+IMAGE_INSTALL:remove = "packagegroup-base-extended"
 
 # Fixed size for both rootfs partitions (2GB each)
 # This ensures both partitions are identical size for swapping
