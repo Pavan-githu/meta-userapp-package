@@ -1,0 +1,16 @@
+[Unit]
+Description=Boot Verification and Auto-Fallback Service
+DefaultDependencies=no
+Before=sysinit.target
+After=local-fs.target
+RequiresMountsFor=/boot
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/boot-verify.sh
+RemainAfterExit=yes
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+WantedBy=sysinit.target

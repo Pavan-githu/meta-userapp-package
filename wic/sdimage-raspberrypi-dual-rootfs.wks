@@ -1,0 +1,17 @@
+# short-description: Create Raspberry Pi SD card image with dual root partitions (A/B layout)
+# long-description: Creates a partitioned SD card image for Raspberry Pi with redundant
+# root filesystems for fail-safe updates and rollback capability.
+#
+# Layout:
+#   - /boot (20MB vfat) - Boot partition with kernel and device tree
+#   - / (rootfs_a) - Primary root filesystem (active)
+#   - /backup (rootfs_b) - Backup root filesystem (for updates/rollback)
+#
+# Usage:
+#   The system boots from rootfs_a by default. When performing OTA updates,
+#   write to rootfs_b, verify, then switch boot flag to make it active.
+#   This provides atomic updates with rollback capability.
+
+part /boot --source bootimg-partition --ondisk mmcblk0 --fstype=vfat --label boot --active --align 4096 --size 20
+part / --source rootfs --ondisk mmcblk0 --fstype=ext4 --label rootfs_a --align 4096 --size 2048
+part /backup --source rootfs --ondisk mmcblk0 --fstype=ext4 --label rootfs_b --align 4096 --size 2048

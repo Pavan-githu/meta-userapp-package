@@ -1,0 +1,12 @@
+[Unit]
+Description=Boot Success Confirmation Service
+After=multi-user.target network.target
+Requires=boot-verify.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/boot-success.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

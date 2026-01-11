@@ -1,0 +1,178 @@
+#!/bin/sh
+# Dual Root Filesystem Manager
+# Manages A/B partition switching for fail-safe updates
+
+BOOT_CONFIG="/boot/cmdline.txt"
+ROOTFS_A="/dev/mmcblk0p2"
+ROOTFS_B="/dev/mmcblk0p3"
+
+get_current_root() {
+    cat /proc/cmdline | grep -o 'root=[^ ]*' | cut -d'=' -f2
+}
+
+get_active_partition() {
+    current=$(get_current_root)
+    if [ "$current" = "$ROOTFS_A" ]; then
+        echo "A"
+    elif [ "$current" = "$ROOTFS_B" ]; then
+        echo "B"
+    else
+        echo "UNKNOWN"
+    fi
+}
+
+get_inactive_partition() {
+    active=$(get_active_partition)
+    if [ "$active" = "A" ]; then
+        echo "B"
+    else
+        echo "A"
+    fi
+}
+
+switch_root() {
+    target=$1
+    current=$(get_current_root)
+    
+    if [ "$target" = "A" ]; then
+        new_root=$ROOTFS_A
+        label="rootfs_a"
+    elif [ "$target" = "B" ]; then
+        new_root=$ROOTFS_B
+        label="rootfs_b"
+    else
+        echo "Error: Invalid partition. Use 'A' or 'B'"
+        return 1
+    fi
+    
+    if [ "$current" = "$new_root" ]; then
+        echo "Already booted from partition $target"
+        return 0
+    fi
+    
+    echo "Switching boot partition from $(get_active_partition) to $target..."
+    
+    # Backup current cmdline.txt
+    cp $BOOT_CONFIG ${BOOT_CONFIG}.bak
+    
+    # Update root= parameter in cmdline.txt
+    sed -i "s|root=[^ ]*|root=$new_root|g" $BOOT_CONFIG
+    
+    echo "Boot partition set to $target ($new_root)"
+    echo "Reboot required to take effect: reboot"
+}
+
+verify_partition() {
+    partition=$1
+    name=$2
+    
+    echo "Verifying $name partition ($partition)..."
+    
+    if [ ! -b "$partition" ]; then
+        echo "ERROR: Partition $partition does not exist!"
+        return 1
+    fi
+    
+    # Run filesystem check
+    fsck -n "$partition" > /tmp/fsck_${name}.log 2>&1
+    result=$?
+    
+    if [ $result -eq 0 ] || [ $result -eq 1 ]; then
+        echo "✓ $name partition is healthy"
+        return 0
+    else
+        echo "✗ $name partition has errors (fsck code: $result)"
+        echo "See /tmp/fsck_${name}.log for details"
+        return 1
+    fi
+}
+
+ensure_backup_readonly() {
+    echo "Ensuring backup partition is mounted read-only..."
+    
+    # Check if backup is mounted
+    if mount | grep -q "$ROOTFS_B"; then
+        # Remount as read-only
+        mount -o remount,ro $ROOTFS_B
+        echo "✓ Backup partition remounted as read-only"
+    else
+        echo "Backup partition not currently mounted"
+    fi
+}
+
+show_status() {
+    echo "========================================="
+    echo "  Dual Root Filesystem Status"
+    echo "========================================="
+    echo "Active Partition: $(get_active_partition)"
+    echo "Current Root: $(get_current_root)"
+    echo ""
+    echo "Partition A: $ROOTFS_A (rootfs_a) - Read/Write"
+    echo "Partition B: $ROOTFS_B (rootfs_b) - Read-Only Backup"
+    echo ""
+    
+    # Show boot counter if exists
+    if [ -f "/boot/boot_count" ]; then
+        boot_count=$(cat /boot/boot_count)
+        echo "Boot Counter: $boot_count"
+    fi
+    
+    df -h $ROOTFS_A $ROOTFS_B 2>/dev/null || echo "(Run as root to see partition usage)"
+    echo "========================================="
+}
+
+case "$1" in
+    status)
+        show_status
+        ;;
+    switch)
+        if [ -z "$2" ]; then
+            echo "Usage: $0 switch [A|B]"
+            exit 1
+        fi
+        switch_root $2
+        ;;
+    active)
+        get_active_partition
+        ;;
+    inactive)
+        get_inactive_partition
+        ;;
+    verify)
+        echo "Verifying both partitions..."
+        verify_partition "$ROOTFS_A" "Primary"
+        verify_partition "$ROOTFS_B" "Backup"
+        ;;
+    ensure-readonly)
+        ensure_backup_readonly
+        ;;
+    *)
+        echo "Dual Root Filesystem Manager with Auto-Fallback"
+        echo ""
+        echo "Usage: $0 {status|switch|active|inactive|verify|ensure-readonly}"
+        echo ""
+        echo "  status           - Show current partition status"
+        echo "  switch [A|B]     - Switch boot partition (requires reboot)"
+        echo "  active           - Print active partition letter"
+        echo "  inactive         - Print inactive partition letter"
+        echo "  verify           - Check filesystem health of both partitions"
+        echo "  ensure-readonly  - Ensure backup partition is read-only"
+        echo ""
+        echo "Auto-Fallback Feature:"
+        echo "  - System automatically verifies primary partition on boot"
+        echo "  - If primary is corrupted, automatically boots from backup"
+        echo "  - Backup partition is always read-only for safety"
+        echo "  - Max 3 boot attempts before fallback triggers"
+        echo ""
+        echo "Example workflow for OTA update:"
+        echo "  1. rootfs-manager status            # Check current partition"
+        echo "  2. rootfs-manager verify            # Verify partition health"
+        echo "  3. mount -o rw /dev/mmcblk0p3 /mnt  # Mount backup as RW temporarily"
+        echo "  4. dd if=new.img of=/dev/mmcblk0p3  # Write update to backup"
+        echo "  5. rootfs-manager verify            # Verify updated partition"
+        echo "  6. rootfs-manager switch B          # Switch to updated partition"
+        echo "  7. reboot                           # Boot into new partition"
+        echo "  8. # System auto-verifies; falls back to A if B is corrupted"
+        exit 1
+        ;;
+esac
