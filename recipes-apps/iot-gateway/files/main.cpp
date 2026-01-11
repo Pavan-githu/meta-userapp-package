@@ -13,11 +13,16 @@ GPIO* led_gpio = nullptr;
 HttpsServer* server = nullptr;
 std::atomic<bool> running(true);
 std::atomic<bool> pause_led(false);  // Control LED blinking during user input
+std::atomic<int> led_blink_speed(5);  // LED blink interval in seconds (default: 5)
 
 // Global certificate paths
 std::string global_cert_file;
 std::string global_key_file;
 std::atomic<bool> certificates_ready(false);
+
+// Global WiFi IP address
+std::string global_wifi_ip = "";
+pthread_mutex_t ip_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 // Signal handler for graceful shutdown
 void signalHandler(int signum) {
@@ -50,13 +55,15 @@ void* ledBlinkThread(void* arg) {
     while (running) {
         // Check if LED should be paused (during user input)
         if (!pause_led) {
+            int speed = led_blink_speed.load();  // Get current speed
+            
             led.setValue(true);
-            std::cout << "[LED] ON" << std::endl;
-            sleep(5);
+            std::cout << "[LED] ON (speed: " << speed << "s)" << std::endl;
+            sleep(speed);
             
             led.setValue(false);
             std::cout << "[LED] OFF" << std::endl;
-            sleep(5);
+            sleep(speed);
         } else {
             // Keep LED off during pause
             led.setValue(false);
@@ -78,24 +85,55 @@ void* wifiManagerThread(void* arg) {
     // Check if already connected
     if (wifi_manager.isConnected()) {
         std::cout << "[WiFi] Already connected to: " << wifi_manager.getCurrentSSID() << std::endl;
-        std::cout << "[WiFi] IP Address: " << wifi_manager.getIPAddress() << std::endl;
+        std::string ip = wifi_manager.getIPAddress();
+        std::cout << "[WiFi] IP Address: " << ip << std::endl;
+        
+        // Store IP globally
+        pthread_mutex_lock(&ip_mutex);
+        global_wifi_ip = ip;
+        pthread_mutex_unlock(&ip_mutex);
     } else {
         std::cout << "[WiFi] Not connected to any network" << std::endl;
         
-        // Pause LED during user input
-        pause_led = true;
-        sleep(1); // Give LED thread time to turn off
-        
-        std::cout << "[WiFi] Do you want to setup WiFi? (y/n): ";
-        char choice;
-        std::cin >> choice;
-        
-        if (choice == 'y' || choice == 'Y') {
-            if (!wifi_manager.interactiveSetup()) {
-                std::cerr << "[WiFi] Setup failed. Continuing without network..." << std::endl;
-            }
+        // Try to auto-connect using saved configuration
+        std::cout << "[WiFi] Checking for saved network configuration..." << std::endl;
+        if (wifi_manager.autoConnect()) {
+            std::cout << "[WiFi] Successfully auto-connected to saved network" << std::endl;
+            std::string ip = wifi_manager.getIPAddress();
+            std::cout << "[WiFi] IP Address: " << ip << std::endl;
+            
+            // Store IP globally
+            pthread_mutex_lock(&ip_mutex);
+            global_wifi_ip = ip;
+            pthread_mutex_unlock(&ip_mutex);
         } else {
-            std::cout << "[WiFi] Skipping setup. Server will be accessible only via Ethernet." << std::endl;
+            // No saved config or auto-connect failed, prompt user
+            std::cout << "[WiFi] No saved network or auto-connect failed" << std::endl;
+            
+            // Pause LED during user input
+            pause_led = true;
+            sleep(1); // Give LED thread time to turn off
+            
+            std::cout << "[WiFi] Do you want to setup WiFi? (y/n): ";
+            char choice;
+            std::cin >> choice;
+            
+            if (choice == 'y' || choice == 'Y') {
+                if (wifi_manager.interactiveSetup()) {
+                    // Store IP globally after successful connection
+                    std::string ip = wifi_manager.getIPAddress();
+                    pthread_mutex_lock(&ip_mutex);
+                    global_wifi_ip = ip;
+                    pthread_mutex_unlock(&ip_mutex);
+                } else {
+                    std::cerr << "[WiFi] Setup failed. Continuing without network..." << std::endl;
+                }
+            } else {
+                std::cout << "[WiFi] Skipping setup. Server will be accessible only via Ethernet." << std::endl;
+            }
+            
+            // Resume LED blinking
+            pause_led = false;
         }
         
         // Resume LED blinking
@@ -191,7 +229,21 @@ void* httpsServerThread(void* arg) {
         pthread_exit(NULL);
     }
     
+    // Get WiFi IP address
+    pthread_mutex_lock(&ip_mutex);
+    std::string wifi_ip = global_wifi_ip;
+    pthread_mutex_unlock(&ip_mutex);
+    
+    std::cout << "\n========================================" << std::endl;
+    std::cout << "   HTTPS SERVER STARTED" << std::endl;
+    std::cout << "========================================" << std::endl;
     std::cout << "[HTTPS] Server running on port 8443" << std::endl;
+    
+    if (!wifi_ip.empty() && wifi_ip != "No IP assigned") {
+        std::cout << "[HTTPS] WiFi URL: https://" << wifi_ip << ":8443/upload" << std::endl;
+    }
+    std::cout << "[HTTPS] Local URL: https://localhost:8443/upload" << std::endl;
+    std::cout << "========================================\n" << std::endl;
     
     // Keep server running
     while (running) {

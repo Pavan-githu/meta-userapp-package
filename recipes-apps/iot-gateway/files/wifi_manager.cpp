@@ -373,6 +373,9 @@ bool WiFiManager::connectToNetwork(const std::string& ssid, const std::string& p
     std::cout << "[CHECK] Obtained IP: " << ip << std::endl;
     std::cout << "[STEP 4/4] ✓ IP address assigned" << std::endl;
     
+    // Verify internet connectivity
+    bool internet_ok = checkInternetAccess();
+    
     // Final status
     std::cout << "\n========================================" << std::endl;
     std::cout << "   CONNECTION SUCCESSFUL" << std::endl;
@@ -380,6 +383,8 @@ bool WiFiManager::connectToNetwork(const std::string& ssid, const std::string& p
     std::cout << "✓ Network: " << ssid << std::endl;
     std::cout << "✓ Interface: " << interface_name << std::endl;
     std::cout << "✓ IP Address: " << ip << std::endl;
+    std::cout << (internet_ok ? "✓" : "✗") << " Internet: " 
+              << (internet_ok ? "Connected" : "Not Available") << std::endl;
     std::cout << "========================================\n" << std::endl;
     return true;
 }
@@ -418,6 +423,44 @@ std::string WiFiManager::getIPAddress() {
     close(fd);
     
     return inet_ntoa(((struct sockaddr_in*)&ifr.ifr_addr)->sin_addr);
+}
+
+bool WiFiManager::checkInternetAccess() {
+    std::cout << "\n[CHECK] Verifying internet connectivity..." << std::endl;
+    std::string output;
+    
+    // Try to ping google.com (send 2 packets with 2 second timeout)
+    std::string cmd = "ping -c 2 -W 2 google.com 2>&1";
+    std::cout << "[CHECK] Testing connection: " << cmd << std::endl;
+    
+    if (executeCommand(cmd, output)) {
+        // Check if we got successful replies
+        if (output.find("bytes from") != std::string::npos || 
+            output.find("2 packets transmitted, 2 received") != std::string::npos) {
+            std::cout << "[CHECK] ✓ Internet access verified - google.com is reachable" << std::endl;
+            return true;
+        }
+    }
+    
+    // Fallback: try curl as alternative test
+    std::cout << "[CHECK] Ping failed, trying HTTP request..." << std::endl;
+    cmd = "curl -s -o /dev/null -w '%{http_code}' --connect-timeout 5 http://google.com 2>&1";
+    if (executeCommand(cmd, output)) {
+        if (output.find("200") != std::string::npos || 
+            output.find("301") != std::string::npos || 
+            output.find("302") != std::string::npos) {
+            std::cout << "[CHECK] ✓ Internet access verified via HTTP" << std::endl;
+            return true;
+        }
+    }
+    
+    std::cerr << "[WARNING] ✗ No internet access detected" << std::endl;
+    std::cerr << "[WARNING] WiFi connected but cannot reach google.com" << std::endl;
+    std::cerr << "[WARNING] Possible reasons:" << std::endl;
+    std::cerr << "  - Router has no internet connection" << std::endl;
+    std::cerr << "  - DNS not configured properly" << std::endl;
+    std::cerr << "  - Firewall blocking outbound traffic" << std::endl;
+    return false;
 }
 
 bool WiFiManager::disconnect() {
@@ -495,4 +538,106 @@ bool WiFiManager::interactiveSetup() {
     
     // Connect
     return connectToNetwork(selected.ssid, password);
+}
+
+bool WiFiManager::autoConnect() {
+    std::cout << "[CHECK] Attempting auto-connect to saved network..." << std::endl;
+    
+    const std::string conf_path = "/etc/wpa_supplicant.conf";
+    
+    // Check if config file exists
+    std::ifstream conf_file(conf_path);
+    if (!conf_file.good()) {
+        std::cout << "[CHECK] No saved configuration found at " << conf_path << std::endl;
+        return false;
+    }
+    
+    // Check if there's a network configuration
+    std::string line;
+    bool has_network = false;
+    while (std::getline(conf_file, line)) {
+        if (line.find("network=") != std::string::npos) {
+            has_network = true;
+            break;
+        }
+    }
+    conf_file.close();
+    
+    if (!has_network) {
+        std::cout << "[CHECK] No network configured in " << conf_path << std::endl;
+        return false;
+    }
+    
+    std::cout << "[CHECK] Found saved network configuration" << std::endl;
+    
+    // Initialize WiFi interface
+    if (!initialize()) {
+        std::cerr << "[ERROR] Failed to initialize WiFi interface" << std::endl;
+        return false;
+    }
+    
+    // Kill existing wpa_supplicant
+    std::string output;
+    std::cout << "[CHECK] Stopping existing wpa_supplicant..." << std::endl;
+    executeCommand("killall wpa_supplicant 2>/dev/null", output);
+    sleep(1);
+    
+    // Start wpa_supplicant with saved config
+    std::string cmd = "wpa_supplicant -B -i " + interface_name + 
+                     " -c " + conf_path;
+    std::cout << "[CHECK] Starting wpa_supplicant: " << cmd << std::endl;
+    if (!executeCommand(cmd, output)) {
+        std::cerr << "[ERROR] Failed to start wpa_supplicant" << std::endl;
+        if (!output.empty()) {
+            std::cerr << "[ERROR] Output: " << output << std::endl;
+        }
+        return false;
+    }
+    
+    std::cout << "[CHECK] wpa_supplicant started, waiting for connection..." << std::endl;
+    
+    // Wait for connection with timeout
+    std::cout << "[CHECK] Monitoring connection status" << std::flush;
+    int timeout = 20; // 20 seconds timeout for auto-connect
+    bool connected = false;
+    for (int i = 0; i < timeout; i++) {
+        sleep(1);
+        std::cout << "." << std::flush;
+        if (isConnected()) {
+            connected = true;
+            std::cout << " Connected at " << (i + 1) << "s" << std::endl;
+            break;
+        }
+    }
+    
+    if (!connected) {
+        std::cout << " Timeout" << std::endl;
+        std::cerr << "[ERROR] Auto-connect failed - connection timeout" << std::endl;
+        return false;
+    }
+    
+    // Get IP address via DHCP
+    std::cout << "[CHECK] Requesting IP address via DHCP..." << std::endl;
+    cmd = "udhcpc -i " + interface_name + " 2>&1";
+    executeCommand(cmd, output);
+    
+    sleep(2);
+    
+    std::string ip = getIPAddress();
+    std::string ssid = getCurrentSSID();
+    
+    // Verify internet connectivity
+    bool internet_ok = checkInternetAccess();
+    
+    std::cout << "\n========================================" << std::endl;
+    std::cout << "   AUTO-CONNECT SUCCESSFUL" << std::endl;
+    std::cout << "========================================" << std::endl;
+    std::cout << "✓ Network: " << ssid << std::endl;
+    std::cout << "✓ Interface: " << interface_name << std::endl;
+    std::cout << "✓ IP Address: " << ip << std::endl;
+    std::cout << (internet_ok ? "✓" : "✗") << " Internet: " 
+              << (internet_ok ? "Connected" : "Not Available") << std::endl;
+    std::cout << "========================================\n" << std::endl;
+    
+    return true;
 }

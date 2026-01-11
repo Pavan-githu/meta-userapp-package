@@ -1,4 +1,5 @@
 #include "https_server.h"
+#include "main.h"
 #include <iostream>
 #include <gnutls/gnutls.h>
 #include <sys/socket.h>
@@ -7,6 +8,7 @@
 #include <ifaddrs.h>
 #include <unistd.h>
 #include <netdb.h>
+#include <sstream>
 
 // Global buffer for uploaded data
 char* uploaded_buffer = nullptr;
@@ -335,6 +337,68 @@ MHD_Result HttpsServer::handleGetRequest(struct MHD_Connection* connection, cons
     return sendResponse(connection, page, MHD_HTTP_OK);
 }
 
+// Handle LED control request
+MHD_Result HttpsServer::handleLedControl(struct MHD_Connection* connection, const char* url) {
+    std::cout << "[LED Control] Request received: " << url << std::endl;
+    
+    // Parse speed parameter from URL: /startledblink?speed=X
+    const char* speed_str = MHD_lookup_connection_value(connection, MHD_GET_ARGUMENT_KIND, "speed");
+    
+    std::string response_str;
+    int status_code = MHD_HTTP_OK;
+    
+    if (speed_str != nullptr) {
+        try {
+            int speed = std::stoi(speed_str);
+            
+            // Validate speed (1-60 seconds)
+            if (speed >= 1 && speed <= 60) {
+                led_blink_speed.store(speed);
+                
+                response_str = "{\n";
+                response_str += "  \"status\": \"success\",\n";
+                response_str += "  \"message\": \"LED blink speed updated\",\n";
+                response_str += "  \"speed\": " + std::to_string(speed) + ",\n";
+                response_str += "  \"unit\": \"seconds\"\n";
+                response_str += "}\n";
+                
+                std::cout << "[LED Control] Speed set to " << speed << " seconds" << std::endl;
+            } else {
+                response_str = "{\n";
+                response_str += "  \"status\": \"error\",\n";
+                response_str += "  \"message\": \"Speed must be between 1 and 60 seconds\"\n";
+                response_str += "}\n";
+                status_code = MHD_HTTP_BAD_REQUEST;
+                
+                std::cerr << "[LED Control] Invalid speed value: " << speed << std::endl;
+            }
+        } catch (const std::exception& e) {
+            response_str = "{\n";
+            response_str += "  \"status\": \"error\",\n";
+            response_str += "  \"message\": \"Invalid speed parameter\"\n";
+            response_str += "}\n";
+            status_code = MHD_HTTP_BAD_REQUEST;
+            
+            std::cerr << "[LED Control] Exception: " << e.what() << std::endl;
+        }
+    } else {
+        // No speed parameter, return current speed
+        int current_speed = led_blink_speed.load();
+        
+        response_str = "{\n";
+        response_str += "  \"status\": \"info\",\n";
+        response_str += "  \"message\": \"Current LED blink speed\",\n";
+        response_str += "  \"speed\": " + std::to_string(current_speed) + ",\n";
+        response_str += "  \"unit\": \"seconds\",\n";
+        response_str += "  \"usage\": \"Add ?speed=X parameter to change (1-60 seconds)\"\n";
+        response_str += "}\n";
+        
+        std::cout << "[LED Control] Current speed query: " << current_speed << " seconds" << std::endl;
+    }
+    
+    return sendResponse(connection, response_str, status_code);
+}
+
 // Send HTTP response
 MHD_Result HttpsServer::sendResponse(struct MHD_Connection* connection, 
                                      const std::string& content, 
@@ -383,6 +447,14 @@ MHD_Result HttpsServer::answerToConnection(void* cls, struct MHD_Connection* con
     // Handle GET or other methods
     if (std::strcmp(method, "GET") == 0) {
         std::cout << "Handling GET request for URL: " << url << std::endl;
+        
+        // LED control endpoint
+        if (std::strcmp(url, "/startledblink") == 0 || 
+            std::strncmp(url, "/startledblink?", 15) == 0) {
+            return handleLedControl(connection, url);
+        }
+        
+        // Default GET handler
         return handleGetRequest(connection, url);
     }
     

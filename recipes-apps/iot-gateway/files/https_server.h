@@ -104,6 +104,8 @@ private:
     
     static MHD_Result handleGetRequest(struct MHD_Connection* connection, const char* url);
     
+    static MHD_Result handleLedControl(struct MHD_Connection* connection, const char* url);
+    
     static MHD_Result sendResponse(struct MHD_Connection* connection, 
                                    const std::string& content, 
                                    int status_code);

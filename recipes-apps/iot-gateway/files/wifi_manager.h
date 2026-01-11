@@ -53,11 +53,17 @@ public:
     std::string getCurrentSSID();
     std::string getIPAddress();
     
+    // Check internet connectivity
+    bool checkInternetAccess();
+    
     // Disconnect from current network
     bool disconnect();
     
     // Save network configuration to wpa_supplicant
     bool saveNetworkConfig(const std::string& ssid, const std::string& password);
+    
+    // Auto-connect using saved configuration
+    bool autoConnect();
     
     // Interactive WiFi setup (for user input)
     bool interactiveSetup();
