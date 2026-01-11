@@ -1,4 +1,5 @@
 #include "main.h"
+#include "version.h"
 #include "certificate.h"
 #include "wifi_manager.h"
 #include <iostream>
@@ -257,7 +258,11 @@ void* httpsServerThread(void* arg) {
 
 int main(int argc, char** argv) {
     std::cout << "==================================================" << std::endl;
-    std::cout << "  IoT Gateway Application" << std::endl;
+    std::cout << "  IoT Gateway Application " << VERSION_FULL_STRING << std::endl;
+    std::cout << "  Version: " << VERSION_STRING << std::endl;
+    std::cout << "  Build: " << BUILD_DATE << " " << BUILD_TIME << std::endl;
+    std::cout << "  Git Commit: " << GIT_COMMIT << std::endl;
+    std::cout << "--------------------------------------------------" << std::endl;
     std::cout << "  - WiFi Setup (Thread)" << std::endl;
     std::cout << "  - LED Blink Controller (Thread)" << std::endl;
     std::cout << "  - HTTPS Firmware Upload Server (Thread)" << std::endl;

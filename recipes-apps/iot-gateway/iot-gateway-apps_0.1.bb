@@ -3,6 +3,9 @@ DESCRIPTION = "Unified application combining LED control and HTTPS firmware down
 LICENSE = "MIT"
 LIC_FILES_CHKSUM = "file://${COMMON_LICENSE_DIR}/MIT;md5=0835ade698e0bcf8506ecda2f7b4f302"
 
+# Application version (sync with version.h)
+PV = "1.0.0"
+
 DEPENDS = "libmicrohttpd gnutls libgpiod"
 RDEPENDS:${PN} = "libmicrohttpd gnutls openssl iw wpa-supplicant libgpiod"
 
@@ -17,13 +20,32 @@ SYSTEMD_SERVICE:${PN} = "iot-gateway.service"
 SYSTEMD_AUTO_ENABLE = "enable"
 
 do_compile() {
-    # Compile unified IoT gateway application
+    # Get git commit hash if available
+    GIT_COMMIT=$(cd ${S} && git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+    BUILD_NUM="${PV}+${PR}"
+    
+    # Compile unified IoT gateway application with build info
     cd ${S}/recipes-apps/iot-gateway/files
-    ${CXX} ${CXXFLAGS} -std=c++11 -pthread -c blink.cpp -o blink.o
-    ${CXX} ${CXXFLAGS} -std=c++11 -pthread -c https_server.cpp -o https_server.o
-    ${CXX} ${CXXFLAGS} -std=c++11 -pthread -c certificate.cpp -o certificate.o
-    ${CXX} ${CXXFLAGS} -std=c++11 -pthread -c wifi_manager.cpp -o wifi_manager.o
-    ${CXX} ${CXXFLAGS} -std=c++11 -pthread -c main.cpp -o main.o
+    ${CXX} ${CXXFLAGS} -std=c++11 -pthread \
+        -DGIT_COMMIT=\"${GIT_COMMIT}\" \
+        -DBUILD_NUMBER=\"${BUILD_NUM}\" \
+        -c blink.cpp -o blink.o
+    ${CXX} ${CXXFLAGS} -std=c++11 -pthread \
+        -DGIT_COMMIT=\"${GIT_COMMIT}\" \
+        -DBUILD_NUMBER=\"${BUILD_NUM}\" \
+        -c https_server.cpp -o https_server.o
+    ${CXX} ${CXXFLAGS} -std=c++11 -pthread \
+        -DGIT_COMMIT=\"${GIT_COMMIT}\" \
+        -DBUILD_NUMBER=\"${BUILD_NUM}\" \
+        -c certificate.cpp -o certificate.o
+    ${CXX} ${CXXFLAGS} -std=c++11 -pthread \
+        -DGIT_COMMIT=\"${GIT_COMMIT}\" \
+        -DBUILD_NUMBER=\"${BUILD_NUM}\" \
+        -c wifi_manager.cpp -o wifi_manager.o
+    ${CXX} ${CXXFLAGS} -std=c++11 -pthread \
+        -DGIT_COMMIT=\"${GIT_COMMIT}\" \
+        -DBUILD_NUMBER=\"${BUILD_NUM}\" \
+        -c main.cpp -o main.o
     ${CXX} ${CXXFLAGS} -pthread -o iot-gateway main.o blink.o https_server.o certificate.o wifi_manager.o \
         ${LDFLAGS} -lmicrohttpd -lgnutls -lgpiod
 }
