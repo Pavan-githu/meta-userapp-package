@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <unistd.h>
+#include <termios.h>
 #include <sys/socket.h>
 #include <sys/ioctl.h>
 #include <netinet/in.h>
@@ -48,6 +49,28 @@ std::string WiFiManager::getWiFiInterface() {
     return output;
 }
 
+std::string WiFiManager::getPasswordHidden() {
+    std::string password;
+    struct termios oldt, newt;
+    
+    // Get current terminal settings
+    tcgetattr(STDIN_FILENO, &oldt);
+    newt = oldt;
+    
+    // Disable echo
+    newt.c_lflag &= ~ECHO;
+    tcsetattr(STDIN_FILENO, TCSANOW, &newt);
+    
+    // Read password
+    std::getline(std::cin, password);
+    
+    // Restore terminal settings
+    tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
+    
+    std::cout << std::endl; // Print newline after hidden input
+    return password;
+}
+
 bool WiFiManager::isWiFiEnabled() {
     std::string output;
     std::string cmd = "ip link show " + interface_name + " | grep 'state UP'";
@@ -84,10 +107,14 @@ bool WiFiManager::scanNetworks() {
     // Trigger scan
     std::string output;
     std::string cmd = "iw " + interface_name + " scan";
+    std::cout << "[CHECK] Executing scan command: " << cmd << std::endl;
+    
     if (!executeCommand(cmd, output)) {
-        std::cerr << "Failed to scan networks. Try running with sudo." << std::endl;
+        std::cerr << "[ERROR] Failed to scan networks. Try running with sudo." << std::endl;
         return false;
     }
+    
+    std::cout << "[CHECK] Scan completed. Output size: " << output.size() << " bytes" << std::endl;
     
     // Parse scan results
     std::istringstream iss(output);
@@ -146,6 +173,8 @@ bool WiFiManager::scanNetworks() {
         available_networks.push_back(WiFiNetwork(current_ssid, signal_strength, encrypted, security));
     }
     
+    std::cout << "[CHECK] Initial parse found " << available_networks.size() << " network entries" << std::endl;
+    
     // Remove duplicates (networks appear multiple times in scan)
     std::vector<WiFiNetwork> unique_networks;
     for (const auto& net : available_networks) {
@@ -158,11 +187,14 @@ bool WiFiManager::scanNetworks() {
         }
         if (!found && !net.ssid.empty()) {
             unique_networks.push_back(net);
+            std::cout << "[CHECK] Added unique network: " << net.ssid 
+                      << " (" << net.signal_strength << "%, " 
+                      << (net.encrypted ? net.security_type : "Open") << ")" << std::endl;
         }
     }
     available_networks = unique_networks;
     
-    std::cout << "Found " << available_networks.size() << " networks" << std::endl;
+    std::cout << "[CHECK] Final count after deduplication: " << available_networks.size() << " networks" << std::endl;
     return !available_networks.empty();
 }
 
@@ -188,9 +220,12 @@ void WiFiManager::displayNetworks() const {
 }
 
 bool WiFiManager::saveNetworkConfig(const std::string& ssid, const std::string& password) {
-    std::cout << "Saving network configuration..." << std::endl;
+    std::cout << "\n[CHECK] Saving network configuration..." << std::endl;
+    std::cout << "[CHECK] SSID: " << ssid << std::endl;
+    std::cout << "[CHECK] Password length: " << password.length() << " characters" << std::endl;
     
     const std::string conf_path = "/etc/wpa_supplicant.conf";
+    std::cout << "[CHECK] Config file path: " << conf_path << std::endl;
     
     // Check if file exists, if not create with basic config
     std::ifstream check_file(conf_path);
@@ -198,104 +233,153 @@ bool WiFiManager::saveNetworkConfig(const std::string& ssid, const std::string& 
     check_file.close();
     
     if (!file_exists) {
+        std::cout << "[CHECK] Config file doesn't exist, creating new one..." << std::endl;
         std::ofstream new_file(conf_path);
         if (!new_file.is_open()) {
-            std::cerr << "Failed to create wpa_supplicant.conf. Try running with sudo." << std::endl;
+            std::cerr << "[ERROR] Failed to create wpa_supplicant.conf. Try running with sudo." << std::endl;
             return false;
         }
         new_file << "ctrl_interface=/var/run/wpa_supplicant\n";
         new_file << "update_config=1\n\n";
         new_file.close();
+        std::cout << "[CHECK] Config file created with headers" << std::endl;
+    } else {
+        std::cout << "[CHECK] Config file already exists" << std::endl;
     }
     
-    // Create wpa_supplicant configuration
+    // Create wpa_supplicant configuration using wpa_passphrase
     std::string config;
     if (password.empty()) {
         // Open network
+        std::cout << "[CHECK] Configuring for open network (no password)" << std::endl;
         config = "network={\n";
         config += "    ssid=\"" + ssid + "\"\n";
         config += "    key_mgmt=NONE\n";
         config += "}\n";
     } else {
-        // WPA/WPA2 network
-        config = "network={\n";
-        config += "    ssid=\"" + ssid + "\"\n";
-        config += "    psk=\"" + password + "\"\n";
-        config += "    key_mgmt=WPA-PSK\n";
-        config += "}\n";
+        // Use wpa_passphrase to generate proper PSK hash
+        std::cout << "[CHECK] Generating PSK hash using wpa_passphrase..." << std::endl;
+        std::string output;
+        std::string cmd = "wpa_passphrase \"" + ssid + "\" \"" + password + "\" 2>&1";
+        if (executeCommand(cmd, output)) {
+            // wpa_passphrase generates the config, use it directly
+            std::cout << "[CHECK] wpa_passphrase executed successfully" << std::endl;
+            std::cout << "[CHECK] Generated config (first 100 chars): " 
+                      << output.substr(0, std::min((size_t)100, output.size())) << "..." << std::endl;
+            config = output;
+        } else {
+            // Fallback to manual config if wpa_passphrase fails
+            std::cerr << "[WARNING] wpa_passphrase failed, using plaintext password" << std::endl;
+            config = "network={\n";
+            config += "    ssid=\"" + ssid + "\"\n";
+            config += "    psk=\"" + password + "\"\n";
+            config += "}\n";
+        }
     }
     
     // Append to wpa_supplicant.conf
+    std::cout << "[CHECK] Writing configuration to file..." << std::endl;
     std::ofstream conf_file(conf_path, std::ios::app);
     if (!conf_file.is_open()) {
-        std::cerr << "Failed to open wpa_supplicant.conf. Try running with sudo." << std::endl;
+        std::cerr << "[ERROR] Failed to open wpa_supplicant.conf. Try running with sudo." << std::endl;
         return false;
     }
     
     conf_file << config;
     conf_file.close();
     
-    std::cout << "Configuration saved successfully" << std::endl;
+    std::cout << "[CHECK] Configuration written successfully (" << config.size() << " bytes)" << std::endl;
+    std::cout << "[CHECK] Network configuration saved to " << conf_path << std::endl;
     return true;
 }
 
 bool WiFiManager::connectToNetwork(const std::string& ssid, const std::string& password) {
-    std::cout << "\nConnecting to: " << ssid << std::endl;
+    std::cout << "\n========================================" << std::endl;
+    std::cout << "[CHECK] Starting connection to: " << ssid << std::endl;
+    std::cout << "========================================" << std::endl;
     
     // Save configuration
+    std::cout << "\n[STEP 1/4] Saving network configuration..." << std::endl;
     if (!saveNetworkConfig(ssid, password)) {
+        std::cerr << "[ERROR] Failed to save network configuration" << std::endl;
         return false;
     }
+    std::cout << "[STEP 1/4] ✓ Configuration saved" << std::endl;
     
     // Restart wpa_supplicant
     std::string output;
-    std::cout << "Restarting wpa_supplicant..." << std::endl;
+    std::cout << "\n[STEP 2/4] Restarting wpa_supplicant..." << std::endl;
     
     // Kill existing wpa_supplicant
+    std::cout << "[CHECK] Killing existing wpa_supplicant processes..." << std::endl;
     executeCommand("killall wpa_supplicant 2>/dev/null", output);
     sleep(1);
+    std::cout << "[CHECK] Old processes terminated" << std::endl;
     
     // Start wpa_supplicant
     std::string cmd = "wpa_supplicant -B -i " + interface_name + 
                      " -c /etc/wpa_supplicant.conf";
+    std::cout << "[CHECK] Starting wpa_supplicant: " << cmd << std::endl;
     if (!executeCommand(cmd, output)) {
-        std::cerr << "Failed to start wpa_supplicant" << std::endl;
+        std::cerr << "[ERROR] Failed to start wpa_supplicant" << std::endl;
+        if (!output.empty()) {
+            std::cerr << "[ERROR] Output: " << output << std::endl;
+        }
         return false;
     }
+    std::cout << "[STEP 2/4] ✓ wpa_supplicant started" << std::endl;
     
     // Wait for connection with timeout
-    std::cout << "Waiting for connection" << std::flush;
+    std::cout << "\n[STEP 3/4] Waiting for connection to " << ssid << std::endl;
+    std::cout << "[CHECK] Monitoring connection status" << std::flush;
     int timeout = 15; // 15 seconds timeout
+    bool connected = false;
     for (int i = 0; i < timeout; i++) {
         sleep(1);
         std::cout << "." << std::flush;
         if (isConnected()) {
+            connected = true;
+            std::cout << " Connected at " << (i + 1) << "s" << std::endl;
             break;
         }
     }
-    std::cout << std::endl;
+    if (!connected) {
+        std::cout << " Timeout" << std::endl;
+    }
     
     // Check if connected
-    if (!isConnected()) {
-        std::cerr << "\n✗ Failed to connect to " << ssid << std::endl;
-        std::cerr << "Possible reasons:\n";
+    if (!connected) {
+        std::cerr << "\n[ERROR] ✗ Failed to connect to " << ssid << std::endl;
+        std::cerr << "[CHECK] Possible reasons:\n";
         std::cerr << "  - Incorrect password\n";
         std::cerr << "  - Signal too weak\n";
         std::cerr << "  - Network configuration issue\n";
+        std::cerr << "\n[DEBUG] Check wpa_supplicant logs: tail -f /var/log/messages" << std::endl;
+        std::cerr << "[DEBUG] Or run: wpa_cli -i " << interface_name << " status" << std::endl;
         return false;
     }
     
+    std::cout << "[STEP 3/4] ✓ Connected to " << ssid << std::endl;
+    
     // Get IP address via DHCP
-    std::cout << "Connected! Requesting IP address..." << std::endl;
+    std::cout << "\n[STEP 4/4] Requesting IP address via DHCP..." << std::endl;
     cmd = "udhcpc -i " + interface_name + " 2>&1";
+    std::cout << "[CHECK] Running: " << cmd << std::endl;
     executeCommand(cmd, output);
     
     sleep(2);
     
+    std::string ip = getIPAddress();
+    std::cout << "[CHECK] Obtained IP: " << ip << std::endl;
+    std::cout << "[STEP 4/4] ✓ IP address assigned" << std::endl;
+    
     // Final status
     std::cout << "\n========================================" << std::endl;
-    std::cout << "✓ Successfully connected to " << ssid << std::endl;
-    std::cout << "IP Address: " << getIPAddress() << std::endl;
+    std::cout << "   CONNECTION SUCCESSFUL" << std::endl;
+    std::cout << "========================================" << std::endl;
+    std::cout << "✓ Network: " << ssid << std::endl;
+    std::cout << "✓ Interface: " << interface_name << std::endl;
+    std::cout << "✓ IP Address: " << ip << std::endl;
     std::cout << "========================================\n" << std::endl;
     return true;
 }
@@ -385,19 +469,28 @@ bool WiFiManager::interactiveSetup() {
     }
     
     const WiFiNetwork& selected = available_networks[choice - 1];
+    std::cout << "\n[CHECK] Selected network #" << choice << ": " << selected.ssid << std::endl;
+    std::cout << "[CHECK] Signal strength: " << selected.signal_strength << "%" << std::endl;
+    std::cout << "[CHECK] Security: " << (selected.encrypted ? selected.security_type : "Open") << std::endl;
+    
     std::string password;
     
     if (selected.encrypted) {
         // Clear input buffer
         std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
         
-        std::cout << "\nEnter password for " << selected.ssid << ": ";
-        std::getline(std::cin, password);
+        std::cout << "\n[CHECK] Network is encrypted, password required" << std::endl;
+        std::cout << "Enter password for " << selected.ssid << ": ";
+        password = getPasswordHidden();  // Use hidden password input
+        
+        std::cout << "[CHECK] Password received (length: " << password.length() << " chars)" << std::endl;
         
         if (password.empty()) {
-            std::cerr << "Password cannot be empty for encrypted network" << std::endl;
+            std::cerr << "[ERROR] Password cannot be empty for encrypted network" << std::endl;
             return false;
         }
+    } else {
+        std::cout << "\n[CHECK] Open network, no password required" << std::endl;
     }
     
     // Connect

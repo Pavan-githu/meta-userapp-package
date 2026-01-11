@@ -25,6 +25,7 @@ private:
     bool executeCommand(const std::string& command, std::string& output);
     bool isWiFiEnabled();
     std::string getWiFiInterface();
+    std::string getPasswordHidden();
     
 public:
     // Constructor
