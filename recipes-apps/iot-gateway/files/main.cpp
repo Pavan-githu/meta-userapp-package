@@ -2,6 +2,7 @@
 #include "version.h"
 #include "certificate.h"
 #include "wifi_manager.h"
+#include "blockchain.h"
 #include <iostream>
 #include <fstream>
 #include <pthread.h>
@@ -256,6 +257,35 @@ void* httpsServerThread(void* arg) {
     pthread_exit(NULL);
 }
 
+// Thread function for blockchain operations
+void* blockchainOperationsThread(void* arg) {
+    std::cout << "[Blockchain Thread] Started" << std::endl;
+
+    // Example: Fetch firmware details
+    std::string firmware_version_to_check = "1.4.2";
+    std::cout << "[Blockchain] Fetching details for firmware version: " << firmware_version_to_check << std::endl;
+
+    FirmwareDetails details = getFirmwareDetails(firmware_version_to_check);
+
+    if (!details.version.empty()) {
+        std::cout << "\n========================================" << std::endl;
+        std::cout << "   FIRMWARE DETAILS (from Blockchain)" << std::endl;
+        std::cout << "========================================" << std::endl;
+        std::cout << "  Version: " << details.version << std::endl;
+        std::cout << "  Device Class: " << details.deviceClass << std::endl;
+        std::cout << "  SHA256: " << details.sha256 << std::endl;
+        std::cout << "  Artifact: " << details.artifact << std::endl;
+        std::cout << "  Signed By: " << details.signedBy << std::endl;
+        std::cout << "  Released At: " << details.releasedAt << std::endl;
+        std::cout << "========================================\n" << std::endl;
+    } else {
+        std::cerr << "[Blockchain] Firmware version " << firmware_version_to_check << " not found." << std::endl;
+    }
+
+    std::cout << "[Blockchain Thread] Completed" << std::endl;
+    pthread_exit(NULL);
+}
+
 int main(int argc, char** argv) {
     std::cout << "==================================================" << std::endl;
     std::cout << "  IoT Gateway Application " << VERSION_FULL_STRING << std::endl;
@@ -266,6 +296,7 @@ int main(int argc, char** argv) {
     std::cout << "  - WiFi Setup (Thread)" << std::endl;
     std::cout << "  - LED Blink Controller (Thread)" << std::endl;
     std::cout << "  - HTTPS Firmware Upload Server (Thread)" << std::endl;
+    std::cout << "  - Blockchain Operations (Thread)" << std::endl;
     std::cout << "==================================================" << std::endl;
     
     // Set up signal handlers
@@ -275,7 +306,7 @@ int main(int argc, char** argv) {
     // Launch all service threads using pthread
     std::cout << "\n--- Starting Service Threads (pthread) ---" << std::endl;
     
-    pthread_t led_thread, cert_thread, wifi_thread, https_thread;
+    pthread_t led_thread, cert_thread, wifi_thread, https_thread, blockchain_thread;
     
     // Create LED blink thread (independent of other services)
     if (pthread_create(&led_thread, NULL, ledBlinkThread, NULL) != 0) {
@@ -304,6 +335,13 @@ int main(int argc, char** argv) {
         return 1;
     }
     std::cout << "[pthread] HTTPS thread created" << std::endl;
+
+    // Create blockchain operations thread
+    if (pthread_create(&blockchain_thread, NULL, blockchainOperationsThread, NULL) != 0) {
+        std::cerr << "Failed to create blockchain thread" << std::endl;
+        return 1;
+    }
+    std::cout << "[pthread] Blockchain thread created" << std::endl;
     
     std::cout << "\n==================================================" << std::endl;
     std::cout << "  All services running in separate threads!" << std::endl;
@@ -311,6 +349,7 @@ int main(int argc, char** argv) {
     std::cout << "  - Certificate: Management in progress" << std::endl;
     std::cout << "  - WiFi: Manager running" << std::endl;
     std::cout << "  - HTTPS: Server on port 8443 (waiting for certificates)" << std::endl;
+    std::cout << "  - Blockchain: Fetching firmware details" << std::endl;
     std::cout << "    * Upload: https://localhost:8443/upload" << std::endl;
     std::cout << "  Press Ctrl+C to stop all services" << std::endl;
     std::cout << "==================================================" << std::endl;
@@ -320,6 +359,7 @@ int main(int argc, char** argv) {
     pthread_join(cert_thread, NULL);
     pthread_join(wifi_thread, NULL);
     pthread_join(https_thread, NULL);
+    pthread_join(blockchain_thread, NULL);
     
     std::cout << "\n=== IoT Gateway Application Stopped ===" << std::endl;
     return 0;
