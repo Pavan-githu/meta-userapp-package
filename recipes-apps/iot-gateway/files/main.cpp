@@ -261,7 +261,7 @@ void* httpsServerThread(void* arg) {
 void* blockchainOperationsThread(void* arg) {
     std::cout << "[Blockchain Thread] Started" << std::endl;
 
-    // Example: Fetch firmware details
+    // Example: Fetch firmware details from blockchain
     std::string firmware_version_to_check = "1.4.2";
     std::cout << "[Blockchain] Fetching details for firmware version: " << firmware_version_to_check << std::endl;
 
@@ -271,12 +271,14 @@ void* blockchainOperationsThread(void* arg) {
         std::cout << "\n========================================" << std::endl;
         std::cout << "   FIRMWARE DETAILS (from Blockchain)" << std::endl;
         std::cout << "========================================" << std::endl;
-        std::cout << "  Version: " << details.version << std::endl;
+        std::cout << "  Version:      " << details.version << std::endl;
         std::cout << "  Device Class: " << details.deviceClass << std::endl;
-        std::cout << "  SHA256: " << details.sha256 << std::endl;
-        std::cout << "  Artifact: " << details.artifact << std::endl;
-        std::cout << "  Signed By: " << details.signedBy << std::endl;
-        std::cout << "  Released At: " << details.releasedAt << std::endl;
+        std::cout << "  SHA256 Hash:  " << details.sha256Hash << std::endl;
+        std::cout << "  Size:         " << details.size << " bytes" << std::endl;
+        std::cout << "  Artifact:     " << details.artifact << std::endl;
+        std::cout << "  Signature:    " << details.signature.substr(0, 50) << "..." << std::endl;
+        std::cout << "  Public Key:   " << details.publicKey.substr(0, 50) << "..." << std::endl;
+        std::cout << "  Released At:  " << details.releasedAt << " (Unix timestamp)" << std::endl;
         std::cout << "========================================\n" << std::endl;
     } else {
         std::cerr << "[Blockchain] Firmware version " << firmware_version_to_check << " not found." << std::endl;
