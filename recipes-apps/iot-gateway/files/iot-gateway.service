@@ -8,7 +8,6 @@ Type=simple
 ExecStart=/usr/bin/iot-gateway
 Restart=on-failure
 RestartSec=10
-StandardInput=tty
 StandardOutput=journal
 StandardError=journal
 

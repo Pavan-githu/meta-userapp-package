@@ -1,0 +1,23 @@
+[Unit]
+Description=Cloudflare Tunnel
+Documentation=https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/
+After=network.target network-online.target
+Wants=network-online.target
+Requires=network-online.target
+
+[Service]
+Type=simple
+# cloudflared-setup.sh decodes the token from /etc/cloudflared/env on first
+# boot, writes credentials.json + config.yml (with noTLSVerify=true so
+# cloudflared can proxy to the local self-signed HTTPS server on port 8443).
+EnvironmentFile=/etc/cloudflared/env
+ExecStartPre=/etc/cloudflared/cloudflared-setup.sh
+ExecStart=/usr/bin/cloudflared tunnel --no-autoupdate --config /etc/cloudflared/config.yml run
+Restart=on-failure
+RestartSec=15
+# Prevent rapid restart loops
+StartLimitIntervalSec=120
+StartLimitBurst=5
+
+[Install]
+WantedBy=multi-user.target

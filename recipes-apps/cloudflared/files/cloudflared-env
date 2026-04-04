@@ -1,0 +1,9 @@
+# Cloudflare Tunnel Token
+# -------------------------------------------
+# Steps to get your token:
+# 1. Go to https://dash.cloudflare.com → Zero Trust → Networks → Tunnels
+# 2. Create a new Tunnel → choose "Cloudflared"
+# 3. Copy the token shown in the install command
+# 4. Paste it below after the = sign (no quotes needed)
+# 5. Then run: systemctl enable --now cloudflared
+CLOUDFLARE_TUNNEL_TOKEN=eyJhIjoiYWMyYzdkOTI0MWE4NTEwMTUwY2Q0MTg0NjA5MjdmNjYiLCJ0IjoiMTMxMDhkNGQtZGY4Yy00NTA2LWFhMWUtZGM2OTI0MTc1YThjIiwicyI6IlpEZ3hZVFZqTm1FdE9EWTFOUzAwTkRZNExUZzVNVGN0Tm1GaE5tUTJZekUwWXpWbSJ9

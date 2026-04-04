@@ -1,0 +1,4 @@
+# Your public Cloudflare domain (e.g. iot.yourdomain.com)
+# This is read by iot-gateway at startup to print the public URL.
+# Set this to the hostname you configured in the Cloudflare tunnel ingress rule.
+raceiotdevice.cc

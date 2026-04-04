@@ -243,6 +243,26 @@ void* httpsServerThread(void* arg) {
         std::cout << "[HTTPS] WiFi URL: https://" << wifi_ip << ":8443/upload" << std::endl;
     }
     std::cout << "[HTTPS] Local URL: https://localhost:8443/upload" << std::endl;
+
+    // Show Cloudflare public URL if domain is configured
+    std::string cf_domain;
+    std::ifstream cf_conf("/etc/cloudflared/domain");
+    if (cf_conf.is_open()) {
+        std::getline(cf_conf, cf_domain);
+        // Skip comment lines
+        while (!cf_domain.empty() && cf_domain[0] == '#') {
+            std::getline(cf_conf, cf_domain);
+        }
+        // Strip any accidental https:// prefix and trailing slash
+        const std::string prefix = "https://";
+        if (cf_domain.substr(0, prefix.size()) == prefix)
+            cf_domain = cf_domain.substr(prefix.size());
+        if (!cf_domain.empty() && cf_domain.back() == '/')
+            cf_domain.pop_back();
+    }
+    if (!cf_domain.empty()) {
+        std::cout << "[HTTPS] Public URL:  https://" << cf_domain << "/upload" << std::endl;
+    }
     std::cout << "========================================\n" << std::endl;
     
     // Keep server running
