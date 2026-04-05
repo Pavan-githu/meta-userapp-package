@@ -1,13 +1,15 @@
 [Unit]
 Description=IoT Gateway Application with WiFi Setup
-After=network.target
+After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
+Environment=PATH=/usr/bin:/bin:/usr/sbin:/sbin
 ExecStart=/usr/bin/iot-gateway
 Restart=on-failure
 RestartSec=10
+StandardInput=null
 StandardOutput=journal
 StandardError=journal
 
