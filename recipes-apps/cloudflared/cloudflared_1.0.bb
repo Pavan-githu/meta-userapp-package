@@ -41,6 +41,12 @@ do_install() {
     # Install systemd service
     install -d ${D}${systemd_system_unitdir}
     install -m 0644 ${WORKDIR}/cloudflared.service ${D}${systemd_system_unitdir}/cloudflared.service
+
+    # Enable cloudflared at boot via an explicit symlink so it is pre-enabled
+    # in the image without requiring 'systemctl enable' after flashing.
+    install -d ${D}${sysconfdir}/systemd/system/multi-user.target.wants
+    ln -sf ${systemd_system_unitdir}/cloudflared.service \
+        ${D}${sysconfdir}/systemd/system/multi-user.target.wants/cloudflared.service
 }
 
 FILES:${PN} += " \
@@ -49,4 +55,5 @@ FILES:${PN} += " \
     ${sysconfdir}/cloudflared/domain \
     ${sysconfdir}/cloudflared/cloudflared-setup.sh \
     ${systemd_system_unitdir}/cloudflared.service \
+    ${sysconfdir}/systemd/system/multi-user.target.wants/cloudflared.service \
 "
