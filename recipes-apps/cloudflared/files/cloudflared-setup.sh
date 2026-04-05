@@ -24,25 +24,38 @@ if [ -z "$CLOUDFLARE_TUNNEL_TOKEN" ]; then
 fi
 
 # Read the public domain (skip comment lines, strip whitespace)
-DOMAIN=$(grep -v '^#' "$CONF_DIR/domain" | head -1 | tr -d '[:space:]')
+DOMAIN=$(grep -v '^#' "$CONF_DIR/domain" | head -n 1 | tr -d '[:space:]')
 if [ -z "$DOMAIN" ]; then
     echo "[cloudflared-setup] ERROR: No domain configured in $CONF_DIR/domain" >&2
     exit 1
 fi
+echo "[cloudflared-setup] Domain: $DOMAIN"
 
 # ── Decode the base64 tunnel token to JSON ──────────────────────────────────
+# Strip any whitespace / carriage-returns that may appear in the env file.
+TOKEN=$(printf '%s' "$CLOUDFLARE_TUNNEL_TOKEN" | tr -d '[:space:]')
+
+echo "[cloudflared-setup] DEBUG: token='$TOKEN'"
+
+
 # The token may lack base64 padding — add it if needed.
-TOKEN="$CLOUDFLARE_TUNNEL_TOKEN"
 MOD=$(( ${#TOKEN} % 4 ))
 if [ "$MOD" -ne 0 ]; then
     PAD=$(( 4 - MOD ))
-    PADDING=$(printf '=%.0s' $(seq 1 $PAD))
+    i=0; PADDING=""
+    while [ $i -lt $PAD ]; do PADDING="${PADDING}="; i=$(( i + 1 )); done
     TOKEN="${TOKEN}${PADDING}"
 fi
 
-TOKEN_JSON=$(printf '%s' "$TOKEN" | base64 -d 2>/dev/null)
-if [ $? -ne 0 ] || [ -z "$TOKEN_JSON" ]; then
+# Try native base64 first; fall back to openssl (more reliable on BusyBox).
+TOKEN_JSON=$(printf '%s\n' "$TOKEN" | base64 -d 2>/dev/null)
+if [ -z "$TOKEN_JSON" ] && command -v openssl >/dev/null 2>&1; then
+    TOKEN_JSON=$(printf '%s\n' "$TOKEN" | openssl base64 -d -A 2>/dev/null)
+fi
+if [ -z "$TOKEN_JSON" ]; then
     echo "[cloudflared-setup] ERROR: Failed to base64-decode the tunnel token" >&2
+    echo "[cloudflared-setup] DEBUG: base64 available=$(command -v base64 2>/dev/null || echo no)" >&2
+    echo "[cloudflared-setup] DEBUG: token length=${#TOKEN}" >&2
     exit 1
 fi
 

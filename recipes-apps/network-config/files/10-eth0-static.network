@@ -2,8 +2,9 @@
 Name=eth0
 
 [Network]
-DHCP=yes
+DHCP=ipv4
 DNS=8.8.8.8
 
 [DHCP]
 RouteMetric=10
+UseDNS=yes
