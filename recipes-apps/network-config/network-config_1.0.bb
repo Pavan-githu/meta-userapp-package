@@ -2,26 +2,33 @@ SUMMARY = "Static Ethernet network configuration for eth0"
 DESCRIPTION = "Configures eth0 with a static IP using systemd-networkd"
 LICENSE = "MIT"
 LIC_FILES_CHKSUM = "file://${COMMON_LICENSE_DIR}/MIT;md5=0835ade698e0bcf8506ecda2f7b4f302"
-PR = "r2"
+PR = "r3"
 
 SRC_URI = "file://10-eth0-static.network"
 
 S = "${WORKDIR}"
 
-inherit systemd
-
-# systemd-networkd is bundled in the main systemd package (FILES:${PN} includes ${systemd_unitdir}/*)
-# Enabling it is handled via SYSTEMD_SERVICE below; no separate RDEPENDS needed.
-SYSTEMD_SERVICE:${PN} = "systemd-networkd.service systemd-networkd.socket"
-SYSTEMD_AUTO_ENABLE:${PN} = "enable"
-
 do_install() {
     bbwarn "network-config: do_install is RUNNING - not from sstate"
-    # Install systemd-networkd config file
+
+    # Install systemd-networkd .network config
     install -d ${D}${sysconfdir}/systemd/network
     install -m 0644 ${WORKDIR}/10-eth0-static.network ${D}${sysconfdir}/systemd/network/
+
+    # Enable systemd-networkd at boot via explicit symlinks.
+    # SYSTEMD_SERVICE bbclass is NOT used here because systemd-networkd.service
+    # belongs to the 'systemd' package, not this recipe; the bbclass skips
+    # symlink creation when the service file is absent from ${D}.
+    install -d ${D}${sysconfdir}/systemd/system/multi-user.target.wants
+    install -d ${D}${sysconfdir}/systemd/system/sockets.target.wants
+    ln -sf /lib/systemd/system/systemd-networkd.service \
+        ${D}${sysconfdir}/systemd/system/multi-user.target.wants/systemd-networkd.service
+    ln -sf /lib/systemd/system/systemd-networkd.socket \
+        ${D}${sysconfdir}/systemd/system/sockets.target.wants/systemd-networkd.socket
 }
 
 FILES:${PN} += " \
     ${sysconfdir}/systemd/network/10-eth0-static.network \
+    ${sysconfdir}/systemd/system/multi-user.target.wants/systemd-networkd.service \
+    ${sysconfdir}/systemd/system/sockets.target.wants/systemd-networkd.socket \
 "
