@@ -3,7 +3,7 @@ DESCRIPTION = "Unified application combining LED control and HTTPS firmware down
 LICENSE = "MIT"
 LIC_FILES_CHKSUM = "file://${COMMON_LICENSE_DIR}/MIT;md5=0835ade698e0bcf8506ecda2f7b4f302"
 
-DEPENDS = "libmicrohttpd gnutls libgpiod"
+DEPENDS = "libmicrohttpd gnutls libgpiod openssl"
 RDEPENDS:${PN} = "libmicrohttpd gnutls openssl iw wpa-supplicant libgpiod"
 
 SRCREV = "${AUTOREV}"
@@ -23,9 +23,10 @@ do_compile() {
     ${CXX} ${CXXFLAGS} -std=c++11 -pthread -c https_server.cpp -o https_server.o
     ${CXX} ${CXXFLAGS} -std=c++11 -pthread -c certificate.cpp -o certificate.o
     ${CXX} ${CXXFLAGS} -std=c++11 -pthread -c wifi_manager.cpp -o wifi_manager.o
+    ${CXX} ${CXXFLAGS} -std=c++11 -pthread -c user_auth.cpp -o user_auth.o
     ${CXX} ${CXXFLAGS} -std=c++11 -pthread -c main.cpp -o main.o
-    ${CXX} ${CXXFLAGS} -pthread -o iot-gateway main.o blink.o https_server.o certificate.o wifi_manager.o \
-        ${LDFLAGS} -lmicrohttpd -lgnutls -lgpiod
+    ${CXX} ${CXXFLAGS} -pthread -o iot-gateway main.o blink.o https_server.o certificate.o wifi_manager.o user_auth.o \
+        ${LDFLAGS} -lmicrohttpd -lgnutls -lgpiod -lssl -lcrypto
 }
 
 do_install() {
@@ -35,6 +36,9 @@ do_install() {
     
     # Install configuration directory for certificates
     install -d ${D}${sysconfdir}/https-server
+
+    # Install user registry directory (mode 700 – root only)
+    install -d -m 0700 ${D}${sysconfdir}/iot-gateway
     
     # Install systemd service
     install -d ${D}${systemd_system_unitdir}
@@ -43,4 +47,5 @@ do_install() {
 
 FILES:${PN} += "${bindir}/iot-gateway"
 FILES:${PN} += "${sysconfdir}/https-server"
+FILES:${PN} += "${sysconfdir}/iot-gateway"
 FILES:${PN} += "${systemd_system_unitdir}/iot-gateway.service"
