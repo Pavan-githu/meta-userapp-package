@@ -7,7 +7,7 @@ DEPENDS = "libmicrohttpd gnutls libgpiod openssl"
 RDEPENDS:${PN} = "libmicrohttpd gnutls openssl iw wpa-supplicant libgpiod"
 
 SRCREV = "${AUTOREV}"
-SRC_URI = "git://github.com/Pavan-githu/meta-userapp-package.git;branch=feature/wificonnection;protocol=https"
+SRC_URI = "git://github.com/Pavan-githu/meta-userapp-package.git;branch=feature/userauth;protocol=https"
 
 S = "${WORKDIR}/git"
 
