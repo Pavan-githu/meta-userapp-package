@@ -9,10 +9,60 @@
 #include <unistd.h>
 #include <netdb.h>
 #include <sstream>
+#include <map>
+#include <cstdio>
 
 // Global buffer for uploaded data
 char* uploaded_buffer = nullptr;
 size_t uploaded_buffer_size = 0;
+
+// Static user database (username -> password)
+std::map<std::string, std::string> HttpsServer::user_db;
+
+// ============================================================================
+// Helper: URL-decode a string from application/x-www-form-urlencoded
+// ============================================================================
+static std::string urlDecode(const std::string& str) {
+    std::string result;
+    for (size_t i = 0; i < str.length(); ++i) {
+        if (str[i] == '+') {
+            result += ' ';
+        } else if (str[i] == '%' && i + 2 < str.length()) {
+            int hex = 0;
+            std::sscanf(str.substr(i + 1, 2).c_str(), "%x", &hex);
+            result += static_cast<char>(hex);
+            i += 2;
+        } else {
+            result += str[i];
+        }
+    }
+    return result;
+}
+
+// Helper: extract a named field from URL-encoded form body
+static std::string getFormField(const std::string& body, const std::string& field) {
+    std::string search = field + "=";
+    size_t pos = body.find(search);
+    if (pos == std::string::npos) return "";
+    pos += search.length();
+    size_t end = body.find('&', pos);
+    std::string value = (end == std::string::npos) ? body.substr(pos) : body.substr(pos, end - pos);
+    return urlDecode(value);
+}
+
+// Helper: validate password policy
+// Requirements: >= 8 chars, >= 1 uppercase, >= 1 lowercase, >= 1 digit, >= 1 special char
+static bool validatePassword(const std::string& pwd) {
+    if (pwd.length() < 8) return false;
+    bool hasUpper = false, hasLower = false, hasDigit = false, hasSpecial = false;
+    for (char c : pwd) {
+        if (std::isupper(static_cast<unsigned char>(c)))  hasUpper   = true;
+        else if (std::islower(static_cast<unsigned char>(c))) hasLower   = true;
+        else if (std::isdigit(static_cast<unsigned char>(c))) hasDigit   = true;
+        else if (std::ispunct(static_cast<unsigned char>(c))) hasSpecial = true;
+    }
+    return hasUpper && hasLower && hasDigit && hasSpecial;
+}
 
 // ============================================================================
 // UploadData Implementation
@@ -324,17 +374,192 @@ MHD_Result HttpsServer::handlePostUpload(struct MHD_Connection* connection,
 
 // Handle GET request
 MHD_Result HttpsServer::handleGetRequest(struct MHD_Connection* connection, const char* url) {
-    std::string page = 
+
+    // --- Registration page ---
+    if (std::strcmp(url, "/register") == 0) {
+        std::string page =
+            "<html><body>"
+            "<h1>Register</h1>"
+            "<form action=\"/register\" method=\"post\">"
+            "<label>Username: <input type=\"text\" name=\"username\" required/></label><br/><br/>"
+            "<label>Password: <input type=\"password\" name=\"password\" required/></label><br/><br/>"
+            "<input type=\"submit\" value=\"Register\"/>"
+            "</form>"
+            "<p><a href=\"/login\">Already registered? Log in</a></p>"
+            "</body></html>";
+        return sendResponse(connection, page, MHD_HTTP_OK);
+    }
+
+    // --- Login page ---
+    if (std::strcmp(url, "/login") == 0) {
+        std::string page =
+            "<html><body>"
+            "<h1>Login</h1>"
+            "<form action=\"/login\" method=\"post\">"
+            "<label>Username: <input type=\"text\" name=\"username\" required/></label><br/><br/>"
+            "<label>Password: <input type=\"password\" name=\"password\" required/></label><br/><br/>"
+            "<input type=\"submit\" value=\"Login\"/>"
+            "</form>"
+            "<p><a href=\"/register\">Don&apos;t have an account? Register</a></p>"
+            "</body></html>";
+        return sendResponse(connection, page, MHD_HTTP_OK);
+    }
+
+    // --- Landing page (default) ---
+    std::string page =
         "<html><body>"
-        "<h1>HTTPS Upload Server</h1>"
+        "<h1>RaceIoT Device</h1>"
+        "<p>Welcome! Please register or log in to continue.</p>"
+        "<a href=\"/register\"><button>Register</button></a>&nbsp;&nbsp;"
+        "<a href=\"/login\"><button>Login</button></a>"
+        "<hr/>"
+        "<h2>HTTPS Upload Server</h2>"
         "<p>POST data to /upload endpoint</p>"
         "<form action=\"/upload\" method=\"post\" enctype=\"multipart/form-data\">"
         "<input type=\"file\" name=\"file\"/>"
         "<input type=\"submit\" value=\"Upload\"/>"
         "</form>"
         "</body></html>";
-    
+
     return sendResponse(connection, page, MHD_HTTP_OK);
+}
+
+// Handle POST /register
+MHD_Result HttpsServer::handleRegisterPost(struct MHD_Connection* connection,
+                                            ConnectionInfo* con_info,
+                                            const char* upload_data,
+                                            size_t* upload_data_size) {
+    if (*upload_data_size > 0) {
+        con_info->createUploadData();
+        con_info->getUploadData()->append(upload_data, *upload_data_size);
+        *upload_data_size = 0;
+        return MHD_YES;
+    }
+
+    // Parse form body
+    UploadData* body = con_info->getUploadData();
+    std::string body_str = (body && body->getSize() > 0)
+        ? std::string(body->getData(), body->getSize()) : "";
+
+    std::string username = getFormField(body_str, "username");
+    std::string password = getFormField(body_str, "password");
+
+    std::string page;
+    if (username.empty() || password.empty()) {
+        page =
+            "<html><body>"
+            "<h1>Register</h1>"
+            "<p style=\"color:red;\">Username and password are required.</p>"
+            "<form action=\"/register\" method=\"post\">"
+            "<label>Username: <input type=\"text\" name=\"username\" required/></label><br/><br/>"
+            "<label>Password: <input type=\"password\" name=\"password\" required/></label><br/><br/>"
+            "<input type=\"submit\" value=\"Register\"/>"
+            "</form>"
+            "<p><a href=\"/login\">Already registered? Log in</a></p>"
+            "</body></html>";
+        return sendResponse(connection, page, MHD_HTTP_BAD_REQUEST);
+    }
+
+    // Password policy check
+    if (!validatePassword(password)) {
+        page =
+            "<html><body>"
+            "<h1>Register</h1>"
+            "<p style=\"color:red;\">Password does not match policy:<br/>"
+            "&bull; Minimum 8 characters<br/>"
+            "&bull; At least one uppercase letter<br/>"
+            "&bull; At least one lowercase letter<br/>"
+            "&bull; At least one digit<br/>"
+            "&bull; At least one special character (!@#$%^&amp;* etc.)</p>"
+            "<form action=\"/register\" method=\"post\">"
+            "<label>Username: <input type=\"text\" name=\"username\" value=\"" + username + "\" required/></label><br/><br/>"
+            "<label>Password: <input type=\"password\" name=\"password\" required/></label><br/><br/>"
+            "<input type=\"submit\" value=\"Register\"/>"
+            "</form>"
+            "<p><a href=\"/login\">Already registered? Log in</a></p>"
+            "</body></html>";
+        return sendResponse(connection, page, MHD_HTTP_BAD_REQUEST);
+    }
+
+    if (user_db.find(username) != user_db.end()) {
+        page =
+            "<html><body>"
+            "<h1>Register</h1>"
+            "<p style=\"color:red;\">Username already exists. Please choose another.</p>"
+            "<form action=\"/register\" method=\"post\">"
+            "<label>Username: <input type=\"text\" name=\"username\" required/></label><br/><br/>"
+            "<label>Password: <input type=\"password\" name=\"password\" required/></label><br/><br/>"
+            "<input type=\"submit\" value=\"Register\"/>"
+            "</form>"
+            "<p><a href=\"/login\">Already registered? Log in</a></p>"
+            "</body></html>";
+        return sendResponse(connection, page, MHD_HTTP_CONFLICT);
+    }
+
+    user_db[username] = password;
+    std::cout << "[Register] New user registered: " << username << std::endl;
+
+    page =
+        "<html><body>"
+        "<h1>Registration Successful!</h1>"
+        "<p>Welcome, <strong>" + username + "</strong>! Your account has been created.</p>"
+        "<a href=\"/login\"><button>Log In</button></a>"
+        "</body></html>";
+    return sendResponse(connection, page, MHD_HTTP_OK);
+}
+
+// Handle POST /login
+MHD_Result HttpsServer::handleLoginPost(struct MHD_Connection* connection,
+                                         ConnectionInfo* con_info,
+                                         const char* upload_data,
+                                         size_t* upload_data_size) {
+    if (*upload_data_size > 0) {
+        con_info->createUploadData();
+        con_info->getUploadData()->append(upload_data, *upload_data_size);
+        *upload_data_size = 0;
+        return MHD_YES;
+    }
+
+    // Parse form body
+    UploadData* body = con_info->getUploadData();
+    std::string body_str = (body && body->getSize() > 0)
+        ? std::string(body->getData(), body->getSize()) : "";
+
+    std::string username = getFormField(body_str, "username");
+    std::string password = getFormField(body_str, "password");
+
+    std::string page;
+    auto it = user_db.find(username);
+    if (it != user_db.end() && it->second == password) {
+        std::cout << "[Login] User logged in: " << username << std::endl;
+        page =
+            "<html><body>"
+            "<h1>Login Successful!</h1>"
+            "<p>Welcome back, <strong>" + username + "</strong>!</p>"
+            "<hr/>"
+            "<h2>HTTPS Upload Server</h2>"
+            "<p>POST data to /upload endpoint</p>"
+            "<form action=\"/upload\" method=\"post\" enctype=\"multipart/form-data\">"
+            "<input type=\"file\" name=\"file\"/>"
+            "<input type=\"submit\" value=\"Upload\"/>"
+            "</form>"
+            "</body></html>";
+        return sendResponse(connection, page, MHD_HTTP_OK);
+    }
+
+    std::cout << "[Login] Failed login attempt for user: " << username << std::endl;
+    page =
+        "<html><body>"
+        "<h1>Login</h1>"
+        "<p style=\"color:red;\">Invalid username or password. Please try again.</p>"
+        "<form action=\"/login\" method=\"post\">"
+        "<label>Username: <input type=\"text\" name=\"username\" required/></label><br/><br/>"
+        "<label>Password: <input type=\"password\" name=\"password\" required/></label><br/><br/>"
+        "<input type=\"submit\" value=\"Login\"/>"
+        "</form>"
+        "<p><a href=\"/register\">Don&apos;t have an account? Register</a></p>"
+        "</body></html>";
+    return sendResponse(connection, page, MHD_HTTP_UNAUTHORIZED);
 }
 
 // Handle LED control request
@@ -439,9 +664,20 @@ MHD_Result HttpsServer::answerToConnection(void* cls, struct MHD_Connection* con
     
     // Handle POST upload
     if (std::strcmp(method, "POST") == 0 && std::strcmp(url, "/upload") == 0) {
-        //Handling POST upload request... Print to linux terminal
         std::cout << "Handling POST upload request..." << std::endl;
         return handlePostUpload(connection, con_info, upload_data, upload_data_size);
+    }
+
+    // Handle POST /register
+    if (std::strcmp(method, "POST") == 0 && std::strcmp(url, "/register") == 0) {
+        std::cout << "Handling POST register request..." << std::endl;
+        return handleRegisterPost(connection, con_info, upload_data, upload_data_size);
+    }
+
+    // Handle POST /login
+    if (std::strcmp(method, "POST") == 0 && std::strcmp(url, "/login") == 0) {
+        std::cout << "Handling POST login request..." << std::endl;
+        return handleLoginPost(connection, con_info, upload_data, upload_data_size);
     }
     
     // Handle GET or other methods

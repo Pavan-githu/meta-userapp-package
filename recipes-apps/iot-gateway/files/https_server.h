@@ -3,6 +3,7 @@
 
 #include <string>
 #include <cstring>
+#include <map>
 #include <microhttpd.h>
 
 // Class to hold uploaded data with dynamic memory management
@@ -105,10 +106,22 @@ private:
     static MHD_Result handleGetRequest(struct MHD_Connection* connection, const char* url);
     
     static MHD_Result handleLedControl(struct MHD_Connection* connection, const char* url);
-    
+
+    static MHD_Result handleRegisterPost(struct MHD_Connection* connection,
+                                         ConnectionInfo* con_info,
+                                         const char* upload_data,
+                                         size_t* upload_data_size);
+
+    static MHD_Result handleLoginPost(struct MHD_Connection* connection,
+                                      ConnectionInfo* con_info,
+                                      const char* upload_data,
+                                      size_t* upload_data_size);
+
     static MHD_Result sendResponse(struct MHD_Connection* connection, 
                                    const std::string& content, 
                                    int status_code);
+
+    static std::map<std::string, std::string> user_db;
 };
 
 #endif // HTTPS_SERVER_H
