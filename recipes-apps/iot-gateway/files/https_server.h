@@ -117,6 +117,11 @@ private:
                                       const char* upload_data,
                                       size_t* upload_data_size);
 
+    static MHD_Result handleOtpPost(struct MHD_Connection* connection,
+                                    ConnectionInfo* con_info,
+                                    const char* upload_data,
+                                    size_t* upload_data_size);
+
     static MHD_Result sendResponse(struct MHD_Connection* connection, 
                                    const std::string& content, 
                                    int status_code);

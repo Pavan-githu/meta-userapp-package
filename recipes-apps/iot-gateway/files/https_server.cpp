@@ -405,6 +405,43 @@ MHD_Result HttpsServer::handleGetRequest(struct MHD_Connection* connection, cons
         return sendResponse(connection, page, MHD_HTTP_OK);
     }
 
+    // --- OTP page ---
+    if (std::strcmp(url, "/otp") == 0) {
+        std::string page =
+            "<html><head><title>OTP Verification</title>"
+            "<script>"
+            "var seconds = 120;"
+            "function countdown() {"
+            "  var m = Math.floor(seconds / 60);"
+            "  var s = seconds % 60;"
+            "  document.getElementById('timer').innerText = "
+            "    (m < 10 ? '0' : '') + m + ':' + (s < 10 ? '0' : '') + s;"
+            "  if (seconds <= 0) {"
+            "    document.getElementById('otp-form').style.display = 'none';"
+            "    document.getElementById('expired').style.display = 'block';"
+            "  } else { seconds--; setTimeout(countdown, 1000); }"
+            "}"
+            "window.onload = countdown;"
+            "</script></head><body>"
+            "<h1>OTP Verification</h1>"
+            "<p>Enter the 6-digit OTP sent to you.</p>"
+            "<p>Time remaining: <strong id='timer'>02:00</strong></p>"
+            "<div id='otp-form'>"
+            "<form action='/otp' method='post'>"
+            "<label>OTP: <input type='text' name='otp' maxlength='6' "
+            "pattern='[0-9]{6}' placeholder='000000' required "
+            "style='font-size:1.5em; letter-spacing:0.3em; width:8em;'/></label><br/><br/>"
+            "<input type='submit' value='Verify OTP'/>"
+            "</form>"
+            "</div>"
+            "<div id='expired' style='display:none; color:red;'>"
+            "<p>OTP has expired. Please <a href='/login'>log in again</a>.</p>"
+            "</div>"
+            "<p><a href='/login'>Back to Login</a></p>"
+            "</body></html>";
+        return sendResponse(connection, page, MHD_HTTP_OK);
+    }
+
     // --- Landing page (default) ---
     std::string page =
         "<html><body>"
@@ -562,6 +599,57 @@ MHD_Result HttpsServer::handleLoginPost(struct MHD_Connection* connection,
     return sendResponse(connection, page, MHD_HTTP_UNAUTHORIZED);
 }
 
+// Handle POST /otp
+MHD_Result HttpsServer::handleOtpPost(struct MHD_Connection* connection,
+                                       ConnectionInfo* con_info,
+                                       const char* upload_data,
+                                       size_t* upload_data_size) {
+    if (*upload_data_size > 0) {
+        con_info->createUploadData();
+        con_info->getUploadData()->append(upload_data, *upload_data_size);
+        *upload_data_size = 0;
+        return MHD_YES;
+    }
+
+    UploadData* body = con_info->getUploadData();
+    std::string body_str = (body && body->getSize() > 0)
+        ? std::string(body->getData(), body->getSize()) : "";
+
+    std::string otp = getFormField(body_str, "otp");
+
+    std::cout << "[OTP] Received OTP input: " << otp << std::endl;
+
+    // Validate: must be exactly 6 digits
+    bool valid = (otp.length() == 6);
+    for (char c : otp) {
+        if (!std::isdigit(static_cast<unsigned char>(c))) { valid = false; break; }
+    }
+
+    if (!valid) {
+        std::string page =
+            "<html><body>"
+            "<h1>OTP Verification</h1>"
+            "<p style='color:red;'>Invalid OTP. Please enter exactly 6 digits.</p>"
+            "<form action='/otp' method='post'>"
+            "<label>OTP: <input type='text' name='otp' maxlength='6' "
+            "pattern='[0-9]{6}' placeholder='000000' required "
+            "style='font-size:1.5em; letter-spacing:0.3em; width:8em;'/></label><br/><br/>"
+            "<input type='submit' value='Verify OTP'/>"
+            "</form>"
+            "<p><a href='/login'>Back to Login</a></p>"
+            "</body></html>";
+        return sendResponse(connection, page, MHD_HTTP_BAD_REQUEST);
+    }
+
+    // OTP verification logic will be added here
+    std::string page =
+        "<html><body>"
+        "<h1>OTP Received</h1>"
+        "<p>OTP <strong>" + otp + "</strong> submitted. Verification pending.</p>"
+        "</body></html>";
+    return sendResponse(connection, page, MHD_HTTP_OK);
+}
+
 // Handle LED control request
 MHD_Result HttpsServer::handleLedControl(struct MHD_Connection* connection, const char* url) {
     std::cout << "[LED Control] Request received: " << url << std::endl;
@@ -679,7 +767,13 @@ MHD_Result HttpsServer::answerToConnection(void* cls, struct MHD_Connection* con
         std::cout << "Handling POST login request..." << std::endl;
         return handleLoginPost(connection, con_info, upload_data, upload_data_size);
     }
-    
+
+    // Handle POST /otp
+    if (std::strcmp(method, "POST") == 0 && std::strcmp(url, "/otp") == 0) {
+        std::cout << "Handling POST OTP request..." << std::endl;
+        return handleOtpPost(connection, con_info, upload_data, upload_data_size);
+    }
+
     // Handle GET or other methods
     if (std::strcmp(method, "GET") == 0) {
         std::cout << "Handling GET request for URL: " << url << std::endl;
