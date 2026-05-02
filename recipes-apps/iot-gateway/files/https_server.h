@@ -168,6 +168,13 @@ public:
     static std::map<std::string, PendingOTP>  s_sessions;     // key = session_id
     static pthread_mutex_t                    s_session_mutex;
     static std::map<std::string, std::string> user_db;        // legacy fallback
+
+    // In-memory blockchain activity log (last 20 events, newest first)
+    static std::vector<std::string>           s_activity_log;
+
+    // Append a timestamped entry; drops oldest when >20 entries.
+    // Safe to call from any thread (uses s_session_mutex for simplicity).
+    static void addActivityLog(const std::string& entry);
 };
 
 #endif // HTTPS_SERVER_H

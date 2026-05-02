@@ -24,9 +24,27 @@ UserAuth*                          HttpsServer::s_user_auth    = nullptr;
 BlockchainLogger*                  HttpsServer::s_blockchain   = nullptr;
 std::map<std::string, PendingOTP>  HttpsServer::s_sessions;
 pthread_mutex_t                    HttpsServer::s_session_mutex = PTHREAD_MUTEX_INITIALIZER;
+std::vector<std::string>           HttpsServer::s_activity_log;
 
 // Legacy password-only fallback (used when s_user_auth is not set)
 std::map<std::string, std::string> HttpsServer::user_db;
+
+// ---------------------------------------------------------------------------
+// addActivityLog  –  prepend timestamped entry, keep last 20
+// ---------------------------------------------------------------------------
+void HttpsServer::addActivityLog(const std::string& entry)
+{
+    std::time_t now = std::time(nullptr);
+    char ts[20];
+    std::strftime(ts, sizeof(ts), "%H:%M:%S", std::localtime(&now));
+    std::string full = std::string(ts) + "  " + entry;
+
+    pthread_mutex_lock(&s_session_mutex);
+    s_activity_log.insert(s_activity_log.begin(), full);
+    if (s_activity_log.size() > 20)
+        s_activity_log.resize(20);
+    pthread_mutex_unlock(&s_session_mutex);
+}
 
 // Global buffer for uploaded data
 char* uploaded_buffer = nullptr;
@@ -447,17 +465,48 @@ MHD_Result HttpsServer::handleGetRequest(struct MHD_Connection* connection, cons
         const char* bc_color = bc_ok ? "green"  : "red";
         const char* bc_icon  = bc_ok ? "&#9989;" : "&#10060;";
 
+        // Build activity log rows
+        std::string log_rows;
+        pthread_mutex_lock(&s_session_mutex);
+        std::vector<std::string> log_copy = s_activity_log;
+        pthread_mutex_unlock(&s_session_mutex);
+
+        if (log_copy.empty()) {
+            log_rows = "<tr><td colspan='2' style='color:#aaa;text-align:center;'>No activity yet</td></tr>";
+        } else {
+            for (const auto& entry : log_copy) {
+                // Split "HH:MM:SS  message" for two-column display
+                auto sp = entry.find("  ");
+                std::string t = (sp != std::string::npos) ? entry.substr(0, sp) : "";
+                std::string m = (sp != std::string::npos) ? entry.substr(sp+2) : entry;
+                // Pick row color by event type
+                std::string color = "#333";
+                if (m.find("FAIL") != std::string::npos || m.find("LOCKOUT") != std::string::npos)
+                    color = "#c0392b";
+                else if (m.find("SUCCESS") || m.find("granted") != std::string::npos)
+                    color = "#27ae60";
+                else if (m.find("BLOCKCHAIN") != std::string::npos)
+                    color = "#2980b9";
+                log_rows +=
+                    "<tr><td style='color:#888;white-space:nowrap;padding:4px 8px;'>" + t + "</td>"
+                    "<td style='color:" + color + ";padding:4px 8px;'>" + m + "</td></tr>";
+            }
+        }
+
         std::string page =
             "<!DOCTYPE html><html lang=\"en\">"
             "<head><meta charset=\"UTF-8\"><title>System Status</title>"
-            "<style>body{font-family:Arial,sans-serif;padding:24px;max-width:600px;margin:auto;}"
+            "<style>body{font-family:Arial,sans-serif;padding:24px;max-width:700px;margin:auto;}"
             ".row{display:flex;justify-content:space-between;align-items:center;"
             "border-bottom:1px solid #eee;padding:12px 0;}"
             ".label{font-weight:bold;color:#333;}"
             ".val{color:" + std::string(bc_color) + ";}"
-            "h1{color:#2c3e50;}"
-            ".detail{font-size:0.82em;color:#777;word-break:break-all;}</style>"
-            "<meta http-equiv=\"refresh\" content=\"30\"/>"
+            "h1{color:#2c3e50;}h2{color:#34495e;margin-top:28px;}"
+            ".detail{font-size:0.82em;color:#777;word-break:break-all;}"
+            "table{width:100%;border-collapse:collapse;font-size:0.88em;}"
+            "th{text-align:left;padding:6px 8px;background:#f0f4f8;color:#555;}"
+            "tr:nth-child(even){background:#fafafa;}</style>"
+            "<meta http-equiv=\"refresh\" content=\"15\"/>"
             "</head><body>"
             "<h1>IoT Gateway System Status</h1>"
             "<div class=\"row\">"
@@ -469,7 +518,12 @@ MHD_Result HttpsServer::handleGetRequest(struct MHD_Connection* connection, cons
             "  <span class=\"val\">" + bc_icon + " " + (bc_ok ? "Reachable" : "Unreachable") + "</span>"
             "</div>"
             "<div class=\"row\"><span class=\"detail\">" + bc_status + "</span></div>"
-            "<p style=\"color:#888;font-size:0.8em;\">Page auto-refreshes every 30 seconds. "
+            "<h2>Blockchain Activity Log</h2>"
+            "<table>"
+            "<tr><th>Time</th><th>Event</th></tr>"
+            + log_rows +
+            "</table>"
+            "<p style=\"color:#888;font-size:0.8em;margin-top:16px;\">Page auto-refreshes every 15 seconds. "
             "<a href=\"/status\">Refresh now</a></p>"
             "<p><a href=\"/\">&#8592; Home</a></p>"
             "</body></html>";
@@ -745,6 +799,11 @@ MHD_Result HttpsServer::handleRegisterPost(struct MHD_Connection* connection,
     }
 
     std::cout << "[Register] New user registered: " << username << "\n";
+    addActivityLog("[REGISTER] User '" + username + "' registered successfully");
+    if (bc_ok)
+        addActivityLog("[BLOCKCHAIN] Seed commitment submitted for '" + username + "'");
+    else
+        addActivityLog("[BLOCKCHAIN] Node unreachable — seed not committed for '" + username + "'");
 
     // ── Success: show the TOTP QR code setup instructions ──────────────────
     page =
@@ -862,7 +921,13 @@ MHD_Result HttpsServer::handleLoginPost(struct MHD_Connection* connection,
             auth_ok ? BlockchainLogger::LOGIN_ATTEMPT
                     : BlockchainLogger::LOGIN_FAIL,
             sid_for_log);
+        addActivityLog(auth_ok
+            ? "[BLOCKCHAIN] Login attempt logged for '" + username + "' (tx submitted)"
+            : "[BLOCKCHAIN] Failed login logged for '" + username + "'");
     }
+    addActivityLog(auth_ok
+        ? "[LOGIN] Password OK for '" + username + "' — OTP phase starting"
+        : "[LOGIN] FAILED password for '" + username + "'");
 
     if (!auth_ok) {
         std::cerr << "[Login] Failed password attempt for user: " << username << "\n";
@@ -920,6 +985,7 @@ MHD_Result HttpsServer::handleLoginPost(struct MHD_Connection* connection,
     // Log OTP_SENT to blockchain (session_id links all events in this attempt)
     if (s_blockchain) {
         s_blockchain->logEvent(username, BlockchainLogger::OTP_SENT, session_id);
+        addActivityLog("[BLOCKCHAIN] OTP_SENT logged for '" + username + "' session=" + session_id.substr(0,8) + "...");
     }
 
     std::cout << "[Login] Password OK for '" << username << "' – OTP phase started\n";
@@ -1071,11 +1137,15 @@ MHD_Result HttpsServer::handleOtpPost(struct MHD_Connection* connection,
         // Log OTP_FAIL to blockchain
         if (s_blockchain) {
             s_blockchain->logEvent(pending.username, BlockchainLogger::OTP_FAIL, session_id);
+            addActivityLog("[BLOCKCHAIN] OTP_FAIL logged for '" + pending.username + "'");
             // If local fails now >= max, also log LOCKOUT event
             if (pending.local_fails >= MAX_LOCAL_OTP_FAILS) {
                 s_blockchain->logEvent(pending.username, BlockchainLogger::LOCKOUT, session_id);
+                addActivityLog("[BLOCKCHAIN] LOCKOUT logged for '" + pending.username + "'");
             }
         }
+        addActivityLog("[OTP] Wrong code for '" + pending.username + "' ("
+            + std::to_string(pending.local_fails) + "/" + std::to_string(MAX_LOCAL_OTP_FAILS) + " fails)");
 
         std::cerr << "[OTP] Wrong OTP for '" << pending.username
                   << "' (local fail " << pending.local_fails << "/" << MAX_LOCAL_OTP_FAILS << ")\n";
@@ -1098,7 +1168,9 @@ MHD_Result HttpsServer::handleOtpPost(struct MHD_Connection* connection,
     // ── OTP correct: log success and grant session ───────────────────────────
     if (s_blockchain) {
         s_blockchain->logEvent(pending.username, BlockchainLogger::OTP_SUCCESS, session_id);
+        addActivityLog("[BLOCKCHAIN] OTP_SUCCESS logged for '" + pending.username + "' — access granted");
     }
+    addActivityLog("[OTP] Verified successfully for '" + pending.username + "'");
 
     // Remove the one-time OTP session
     pthread_mutex_lock(&s_session_mutex);
