@@ -1,6 +1,8 @@
 #include "main.h"
 #include "certificate.h"
 #include "wifi_manager.h"
+#include "user_auth.h"
+#include "blockchain_logger.h"
 #include <iostream>
 #include <fstream>
 #include <pthread.h>
@@ -222,6 +224,50 @@ void* httpsServerThread(void* arg) {
     
     HttpsServer https_server(8443);
     server = &https_server;
+
+    // ── MFA: initialise UserAuth and BlockchainLogger ────────────────────────
+    // UserAuth: persistent PBKDF2 user registry with TOTP secrets
+    UserAuth user_auth("/etc/iot-gateway/users.db");
+
+    // BlockchainLogger: read config from /etc/iot-gateway/blockchain.conf
+    // Format (one key=value per line):
+    //   BLOCKCHAIN_RPC_URL=http://192.168.1.100:8545
+    //   BLOCKCHAIN_CONTRACT=0x...
+    //   BLOCKCHAIN_DEVICE_ADDR=0x...
+    //   BLOCKCHAIN_CHAIN_ID=1337
+    std::string bc_rpc      = "http://127.0.0.1:8545";
+    std::string bc_contract = "";
+    std::string bc_device   = "";
+    uint64_t    bc_chain    = 1337;
+
+    std::ifstream bc_conf("/etc/iot-gateway/blockchain.conf");
+    if (bc_conf.is_open()) {
+        std::string line;
+        while (std::getline(bc_conf, line)) {
+            if (line.empty() || line[0] == '#') continue;
+            auto eq = line.find('=');
+            if (eq == std::string::npos) continue;
+            std::string key = line.substr(0, eq);
+            std::string val = line.substr(eq + 1);
+            if      (key == "BLOCKCHAIN_RPC_URL")      bc_rpc      = val;
+            else if (key == "BLOCKCHAIN_CONTRACT")     bc_contract = val;
+            else if (key == "BLOCKCHAIN_DEVICE_ADDR")  bc_device   = val;
+            else if (key == "BLOCKCHAIN_CHAIN_ID")     bc_chain    = std::stoull(val);
+        }
+    } else {
+        std::cerr << "[HTTPS] /etc/iot-gateway/blockchain.conf not found – "
+                     "blockchain logging disabled\n";
+    }
+
+    BlockchainLogger* blockchain = nullptr;
+    if (!bc_contract.empty() && !bc_device.empty()) {
+        blockchain = new BlockchainLogger(bc_rpc, bc_contract, bc_device, bc_chain);
+    } else {
+        std::cerr << "[HTTPS] Blockchain not configured – OTP events won't be logged on-chain\n";
+    }
+
+    HttpsServer::initMFA(&user_auth, blockchain);
+    // ────────────────────────────────────────────────────────────────────────
     
     if (!https_server.start(cert_file.c_str(), key_file.c_str())) {
         std::cerr << "[HTTPS] Failed to start server" << std::endl;
@@ -271,6 +317,7 @@ void* httpsServerThread(void* arg) {
     }
     
     https_server.stop();
+    delete blockchain;
     std::cout << "[HTTPS Thread] Stopped" << std::endl;
     pthread_exit(NULL);
 }

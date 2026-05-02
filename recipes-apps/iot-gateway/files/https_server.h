@@ -3,8 +3,34 @@
 
 #include <string>
 #include <cstring>
+#include <ctime>
 #include <map>
+#include <pthread.h>
 #include <microhttpd.h>
+
+// Forward declarations – avoid pulling heavy headers into this header
+class UserAuth;
+class BlockchainLogger;
+
+// ---------------------------------------------------------------------------
+// PendingOTP – in-memory state for the OTP verification phase
+//
+// Created when a user successfully passes the password check and destroyed
+// once the OTP is verified (or expires after OTP_SESSION_TTL seconds).
+// The session_id is sent as a Secure HttpOnly cookie and used as the map key.
+// ---------------------------------------------------------------------------
+struct PendingOTP {
+    std::string username;       // who is authenticating
+    std::string totp_secret;    // base32 TOTP secret for this user
+    std::string session_id;     // 64-hex-char (32-byte) random session token
+    std::time_t expires_at;     // Unix timestamp – expires after OTP_SESSION_TTL s
+    int         local_fails;    // local fail counter (blockchain is authoritative)
+};
+
+// How long (seconds) the OTP phase stays open before it expires
+static const int OTP_SESSION_TTL = 120;
+// Max local OTP failures before refusing to check blockchain (fast path)
+static const int MAX_LOCAL_OTP_FAILS = 3;
 
 // Class to hold uploaded data with dynamic memory management
 class UploadData {
@@ -82,8 +108,14 @@ public:
     void stop();
     bool isRunning() const { return running; }
     int getPort() const { return port; }
-    
-    // Static callback functions for libmicrohttpd
+
+    // ------------------------------------------------------------------
+    // MFA initialisation  (call before start())
+    // ------------------------------------------------------------------
+    // Wire the UserAuth registry and BlockchainLogger into the server.
+    // Both pointers must remain valid for the server’s lifetime.
+    static void initMFA(UserAuth* user_auth, BlockchainLogger* blockchain);
+
     static MHD_Result answerToConnection(void* cls, struct MHD_Connection* connection,
                                         const char* url, const char* method,
                                         const char* version, const char* upload_data,
@@ -126,7 +158,14 @@ private:
                                    const std::string& content, 
                                    int status_code);
 
-    static std::map<std::string, std::string> user_db;
+    // ------------------------------------------------------------------
+    // Static MFA state  (protected by s_session_mutex)
+    // ------------------------------------------------------------------
+    static UserAuth*                          s_user_auth;
+    static BlockchainLogger*                  s_blockchain;
+    static std::map<std::string, PendingOTP>  s_sessions;     // key = session_id
+    static pthread_mutex_t                    s_session_mutex;
+    static std::map<std::string, std::string> user_db;        // legacy fallback
 };
 
 #endif // HTTPS_SERVER_H

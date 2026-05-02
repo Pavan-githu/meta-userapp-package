@@ -1,5 +1,9 @@
 #include "https_server.h"
 #include "main.h"
+#include "user_auth.h"
+#include "otp_manager.h"
+#include "blockchain_logger.h"
+
 #include <iostream>
 #include <gnutls/gnutls.h>
 #include <sys/socket.h>
@@ -11,13 +15,62 @@
 #include <sstream>
 #include <map>
 #include <cstdio>
+#include <ctime>
+
+// ---------------------------------------------------------------------------
+// Static MFA state
+// ---------------------------------------------------------------------------
+UserAuth*                          HttpsServer::s_user_auth    = nullptr;
+BlockchainLogger*                  HttpsServer::s_blockchain   = nullptr;
+std::map<std::string, PendingOTP>  HttpsServer::s_sessions;
+pthread_mutex_t                    HttpsServer::s_session_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+// Legacy password-only fallback (used when s_user_auth is not set)
+std::map<std::string, std::string> HttpsServer::user_db;
 
 // Global buffer for uploaded data
 char* uploaded_buffer = nullptr;
 size_t uploaded_buffer_size = 0;
 
-// Static user database (username -> password)
-std::map<std::string, std::string> HttpsServer::user_db;
+// ---------------------------------------------------------------------------
+// HttpsServer::initMFA
+// ---------------------------------------------------------------------------
+void HttpsServer::initMFA(UserAuth* user_auth, BlockchainLogger* blockchain)
+{
+    s_user_auth  = user_auth;
+    s_blockchain = blockchain;
+    std::cout << "[HttpsServer] MFA initialized:"
+              << " UserAuth=" << (user_auth   ? "yes" : "NO")
+              << " Blockchain=" << (blockchain ? "yes" : "NO (audit disabled)")
+              << "\n";
+}
+
+// ---------------------------------------------------------------------------
+// Session helpers
+// ---------------------------------------------------------------------------
+
+// Remove expired sessions (called at start of each request handling)
+static void purgeExpiredSessions()
+{
+    std::time_t now = std::time(nullptr);
+    pthread_mutex_lock(&HttpsServer::s_session_mutex);
+    for (auto it = HttpsServer::s_sessions.begin();
+         it != HttpsServer::s_sessions.end(); ) {
+        if (it->second.expires_at <= now)
+            it = HttpsServer::s_sessions.erase(it);
+        else
+            ++it;
+    }
+    pthread_mutex_unlock(&HttpsServer::s_session_mutex);
+}
+
+// Read the iotgw_session cookie from the current request
+static std::string readSessionCookie(struct MHD_Connection* conn)
+{
+    const char* val = MHD_lookup_connection_value(
+        conn, MHD_COOKIE_KIND, "iotgw_session");
+    return val ? std::string(val) : "";
+}
 
 // ============================================================================
 // Helper: URL-decode a string from application/x-www-form-urlencoded
@@ -375,6 +428,50 @@ MHD_Result HttpsServer::handlePostUpload(struct MHD_Connection* connection,
 // Handle GET request
 MHD_Result HttpsServer::handleGetRequest(struct MHD_Connection* connection, const char* url) {
 
+    // --- System status page ---
+    if (std::strcmp(url, "/status") == 0) {
+        std::string bc_status;
+        bool bc_ok = false;
+        if (s_blockchain) {
+            std::string bc_err;
+            bc_ok = s_blockchain->checkConnectivity(bc_err);
+            bc_status = bc_ok ? s_blockchain->getStatusString() : bc_err;
+        } else {
+            bc_status = "Blockchain logger not initialised.";
+        }
+
+        const char* bc_color = bc_ok ? "green"  : "red";
+        const char* bc_icon  = bc_ok ? "&#9989;" : "&#10060;";
+
+        std::string page =
+            "<!DOCTYPE html><html lang=\"en\">"
+            "<head><meta charset=\"UTF-8\"><title>System Status</title>"
+            "<style>body{font-family:Arial,sans-serif;padding:24px;max-width:600px;margin:auto;}"
+            ".row{display:flex;justify-content:space-between;align-items:center;"
+            "border-bottom:1px solid #eee;padding:12px 0;}"
+            ".label{font-weight:bold;color:#333;}"
+            ".val{color:" + std::string(bc_color) + ";}"
+            "h1{color:#2c3e50;}"
+            ".detail{font-size:0.82em;color:#777;word-break:break-all;}</style>"
+            "<meta http-equiv=\"refresh\" content=\"30\"/>"
+            "</head><body>"
+            "<h1>IoT Gateway System Status</h1>"
+            "<div class=\"row\">"
+            "  <span class=\"label\">HTTPS Server</span>"
+            "  <span style=\"color:green;\">&#9989; Running</span>"
+            "</div>"
+            "<div class=\"row\">"
+            "  <span class=\"label\">Ethereum Node</span>"
+            "  <span class=\"val\">" + bc_icon + " " + (bc_ok ? "Reachable" : "Unreachable") + "</span>"
+            "</div>"
+            "<div class=\"row\"><span class=\"detail\">" + bc_status + "</span></div>"
+            "<p style=\"color:#888;font-size:0.8em;\">Page auto-refreshes every 30 seconds. "
+            "<a href=\"/status\">Refresh now</a></p>"
+            "<p><a href=\"/\">&#8592; Home</a></p>"
+            "</body></html>";
+        return sendResponse(connection, page, MHD_HTTP_OK);
+    }
+
     // --- Registration page ---
     if (std::strcmp(url, "/register") == 0) {
         std::string page =
@@ -392,15 +489,28 @@ MHD_Result HttpsServer::handleGetRequest(struct MHD_Connection* connection, cons
 
     // --- Login page ---
     if (std::strcmp(url, "/login") == 0) {
+        // Show live blockchain status banner in the login form
+        std::string bc_banner;
+        if (s_blockchain) {
+            std::string bc_err;
+            bool bc_ok = s_blockchain->checkConnectivity(bc_err);
+            std::string detail = bc_ok ? s_blockchain->getStatusString() : bc_err;
+            bc_banner = blockchainStatusBanner(bc_ok, detail);
+        } else {
+            bc_banner = blockchainStatusBanner(false, "Blockchain logger not initialised.");
+        }
+
         std::string page =
             "<html><body>"
             "<h1>Login</h1>"
+            + bc_banner +
             "<form action=\"/login\" method=\"post\">"
             "<label>Username: <input type=\"text\" name=\"username\" required/></label><br/><br/>"
             "<label>Password: <input type=\"password\" name=\"password\" required/></label><br/><br/>"
             "<input type=\"submit\" value=\"Login\"/>"
             "</form>"
             "<p><a href=\"/register\">Don&apos;t have an account? Register</a></p>"
+            "<p><small><a href=\"/status\">System Status</a></small></p>"
             "</body></html>";
         return sendResponse(connection, page, MHD_HTTP_OK);
     }
@@ -461,6 +571,72 @@ MHD_Result HttpsServer::handleGetRequest(struct MHD_Connection* connection, cons
     return sendResponse(connection, page, MHD_HTTP_OK);
 }
 
+// ============================================================================
+// Blockchain error page helper
+// ============================================================================
+
+/**
+ * Returns a styled HTML page that informs the user the blockchain is
+ * unreachable.  Used in all three POST handlers (register/login/otp).
+ *
+ * @param reason  Human-readable reason string from checkConnectivity().
+ * @param backUrl URL for the "Try Again" / back button (e.g. "/login").
+ */
+static std::string buildBlockchainErrorPage(const std::string& reason,
+                                             const std::string& backUrl)
+{
+    return
+        "<!DOCTYPE html><html lang=\"en\">"
+        "<head><meta charset=\"UTF-8\"><title>Blockchain Unavailable</title>"
+        "<style>"
+        "body{font-family:Arial,sans-serif;margin:0;padding:0;"
+        "background:#f5f5f5;display:flex;justify-content:center;align-items:center;"
+        "min-height:100vh;}"
+        ".card{background:#fff;border-radius:8px;box-shadow:0 2px 12px rgba(0,0,0,0.15);"
+        "padding:36px 40px;max-width:520px;width:100%;}"
+        ".icon{font-size:3em;text-align:center;margin-bottom:8px;}"
+        "h1{color:#c0392b;margin-top:0;font-size:1.4em;text-align:center;}"
+        ".reason{background:#fdf3f2;border-left:4px solid #c0392b;"
+        "padding:10px 14px;border-radius:4px;font-size:0.85em;"
+        "color:#555;word-break:break-all;margin:16px 0;}"
+        ".btn{display:inline-block;margin-top:18px;padding:10px 24px;"
+        "background:#3498db;color:#fff;text-decoration:none;"
+        "border-radius:5px;font-size:1em;}"
+        ".btn:hover{background:#2980b9;}"
+        "p{color:#444;line-height:1.5;}"
+        "</style></head>"
+        "<body><div class=\"card\">"
+        "<div class=\"icon\">&#128274;</div>"
+        "<h1>Blockchain Not Accessible</h1>"
+        "<p>Authentication requires a live connection to the Ethereum audit ledger "
+        "on the IoT Gateway VPS. The node is currently unreachable.</p>"
+        "<p><strong>What this means:</strong> Your credentials cannot be verified "
+        "without a blockchain connection. No access is granted.</p>"
+        "<div class=\"reason\"><strong>Technical detail:</strong> " + reason + "</div>"
+        "<p>Please contact the system administrator or try again once the "
+        "Ethereum node is back online.</p>"
+        "<a href=\"" + backUrl + "\" class=\"btn\">&#8592; Try Again</a>"
+        "</div></body></html>";
+}
+
+/**
+ * Returns a small HTML warning banner to embed in other pages when blockchain
+ * is reachable but might be degraded.  Pass statusOk=true for a green banner,
+ * false for a yellow warning.
+ */
+static std::string blockchainStatusBanner(bool statusOk, const std::string& detail)
+{
+    const char* bg  = statusOk ? "#d4edda" : "#fff3cd";
+    const char* col = statusOk ? "#155724" : "#856404";
+    const char* ico = statusOk ? "&#9989;" : "&#9888;";
+    return
+        "<div style=\"background:" + std::string(bg) + ";color:" + col + ";"
+        "border-radius:5px;padding:8px 14px;margin-bottom:14px;"
+        "font-size:0.85em;\">"
+        + ico + " <strong>Blockchain:</strong> " + detail +
+        "</div>";
+}
+
 // Handle POST /register
 MHD_Result HttpsServer::handleRegisterPost(struct MHD_Connection* connection,
                                             ConnectionInfo* con_info,
@@ -471,6 +647,17 @@ MHD_Result HttpsServer::handleRegisterPost(struct MHD_Connection* connection,
         con_info->getUploadData()->append(upload_data, *upload_data_size);
         *upload_data_size = 0;
         return MHD_YES;
+    }
+
+    // ── Live blockchain status (non-blocking: registration is local, warn only)
+    std::string bc_status_detail;
+    bool bc_ok = false;
+    if (s_blockchain) {
+        std::string bc_err;
+        bc_ok = s_blockchain->checkConnectivity(bc_err);
+        bc_status_detail = bc_ok ? s_blockchain->getStatusString() : bc_err;
+    } else {
+        bc_status_detail = "Blockchain logger not initialised.";
     }
 
     // Parse form body
@@ -518,13 +705,33 @@ MHD_Result HttpsServer::handleRegisterPost(struct MHD_Connection* connection,
         return sendResponse(connection, page, MHD_HTTP_BAD_REQUEST);
     }
 
-    if (user_db.find(username) != user_db.end()) {
+    // ── Use UserAuth (PBKDF2) if available, else legacy user_db ────────────
+    bool registered = false;
+    std::string totp_uri;
+
+    if (s_user_auth) {
+        registered = s_user_auth->registerUser(username, password);
+        if (registered) {
+            // Retrieve the generated TOTP secret to build the QR URI
+            std::string totp_secret;
+            s_user_auth->getTotpSecret(username, totp_secret);
+            totp_uri = OTPManager::buildOtpauthURI("RaceIoT-Gateway", username, totp_secret);
+        }
+    } else {
+        // Legacy fallback
+        if (user_db.find(username) == user_db.end()) {
+            user_db[username] = password;
+            registered = true;
+        }
+    }
+
+    if (!registered) {
         page =
             "<html><body>"
             "<h1>Register</h1>"
-            "<p style=\"color:red;\">Username already exists. Please choose another.</p>"
+            "<p style=\"color:red;\">Username already exists or registration failed.</p>"
             "<form action=\"/register\" method=\"post\">"
-            "<label>Username: <input type=\"text\" name=\"username\" required/></label><br/><br/>"
+            "<label>Username: <input type=\"text\" name=\"username\" value=\"" + username + "\" required/></label><br/><br/>"
             "<label>Password: <input type=\"password\" name=\"password\" required/></label><br/><br/>"
             "<input type=\"submit\" value=\"Register\"/>"
             "</form>"
@@ -533,15 +740,53 @@ MHD_Result HttpsServer::handleRegisterPost(struct MHD_Connection* connection,
         return sendResponse(connection, page, MHD_HTTP_CONFLICT);
     }
 
-    user_db[username] = password;
-    std::cout << "[Register] New user registered: " << username << std::endl;
+    std::cout << "[Register] New user registered: " << username << "\n";
 
+    // ── Success: show the TOTP QR code setup instructions ──────────────────
     page =
-        "<html><body>"
+        "<html><head><title>Registration Successful</title></head><body>"
         "<h1>Registration Successful!</h1>"
-        "<p>Welcome, <strong>" + username + "</strong>! Your account has been created.</p>"
-        "<a href=\"/login\"><button>Log In</button></a>"
+        "<p>Welcome, <strong>" + username + "</strong>!</p>"
+        "<hr/>"
+        "<h2>Set Up Two-Factor Authentication (TOTP)</h2>"
+        "<p>You <strong>must</strong> complete this step before you can log in.</p>"
+        "<ol>"
+        "<li>Install <strong>Google Authenticator</strong>, <strong>Authy</strong>, or any TOTP app.</li>"
+        "<li>In the app, tap <em>Add account → Scan QR code</em>.</li>"
+        "<li>Scan the QR code below, or enter the URI manually.</li>"
+        "</ol>";
+
+    if (!totp_uri.empty()) {
+        // Embed a QR code via the free qrserver.com API (replace with a local
+        // generator in fully air-gapped deployments).
+        std::string qr_url = "https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=";
+        // Minimal percent-encoding of the otpauth URI for the img src
+        std::string encoded_uri;
+        for (unsigned char c : totp_uri) {
+            if (std::isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~'
+                || c == ':' || c == '/' || c == '?' || c == '=' || c == '&') {
+                encoded_uri += c;
+            } else {
+                char buf[4]; std::snprintf(buf, sizeof(buf), "%%%02X", c);
+                encoded_uri += buf;
+            }
+        }
+        page += "<p><img src=\"" + qr_url + encoded_uri + "\" alt=\"TOTP QR Code\" width=\"200\" height=\"200\"/></p>";
+        page += "<p><small>URI: <code>" + totp_uri + "</code></small></p>";
+    }
+
+    page +=
+        "<hr/>"
+        + blockchainStatusBanner(bc_ok, bc_status_detail) +
+        (bc_ok ? "" :
+            "<p style=\"color:#856404;\"><strong>Note:</strong> The seed commitment "
+            "could not be recorded on the blockchain. Login will still use TOTP, "
+            "but blockchain audit logging is currently unavailable.</p>")
+        +
+        "<p>Once you have added the account to your authenticator app, "
+        "<a href=\"/login\"><button>Log In</button></a></p>"
         "</body></html>";
+
     return sendResponse(connection, page, MHD_HTTP_OK);
 }
 
@@ -557,6 +802,21 @@ MHD_Result HttpsServer::handleLoginPost(struct MHD_Connection* connection,
         return MHD_YES;
     }
 
+    // ── Live blockchain connectivity check (blocking: login requires chain) ──
+    {
+        std::string bc_err;
+        bool bc_ok = s_blockchain && s_blockchain->checkConnectivity(bc_err);
+        if (!bc_ok) {
+            if (bc_err.empty()) bc_err = "Blockchain logger not initialised.";
+            std::cerr << "[Login] Blockchain unreachable: " << bc_err << "\n";
+            return sendResponse(connection,
+                buildBlockchainErrorPage(bc_err, "/login"),
+                MHD_HTTP_SERVICE_UNAVAILABLE);
+        }
+    }
+
+    purgeExpiredSessions();
+
     // Parse form body
     UploadData* body = con_info->getUploadData();
     std::string body_str = (body && body->getSize() > 0)
@@ -565,38 +825,123 @@ MHD_Result HttpsServer::handleLoginPost(struct MHD_Connection* connection,
     std::string username = getFormField(body_str, "username");
     std::string password = getFormField(body_str, "password");
 
-    std::string page;
-    auto it = user_db.find(username);
-    if (it != user_db.end() && it->second == password) {
-        std::cout << "[Login] User logged in: " << username << std::endl;
-        page =
+    // ── Input validation — reject before touching the database ───────────────
+    // isValidUsername enforces: non-empty, ≤64 chars, [a-zA-Z0-9_-] only.
+    // Checked HERE so no DB I/O occurs on malformed input.
+    if (username.empty() || password.empty() ||
+        !UserAuth::isValidUsername(username)) {
+        return sendResponse(connection,
+            "<html><body><h1>Login</h1>"
+            "<p style='color:red;'>Invalid username or password.</p>"
+            "<form action='/login' method='post'>"
+            "<label>Username: <input type='text' name='username' required/></label><br/><br/>"
+            "<label>Password: <input type='password' name='password' required/></label><br/><br/>"
+            "<input type='submit' value='Login'/>"
+            "</form></body></html>",
+            MHD_HTTP_BAD_REQUEST);
+    }
+
+    // ── Verify password ─────────────────────────────────────────────────────
+    bool auth_ok = false;
+    if (s_user_auth) {
+        auth_ok = s_user_auth->authenticate(username, password);
+    } else {
+        // Legacy fallback
+        auto it = user_db.find(username);
+        auth_ok = (it != user_db.end() && it->second == password);
+    }
+
+    // Log to blockchain regardless of outcome
+    std::string sid_for_log = BlockchainLogger::generateSessionId();
+    if (s_blockchain) {
+        s_blockchain->logEvent(username,
+            auth_ok ? BlockchainLogger::LOGIN_ATTEMPT
+                    : BlockchainLogger::LOGIN_FAIL,
+            sid_for_log);
+    }
+
+    if (!auth_ok) {
+        std::cerr << "[Login] Failed password attempt for user: " << username << "\n";
+        std::string page =
             "<html><body>"
-            "<h1>Login Successful!</h1>"
-            "<p>Welcome back, <strong>" + username + "</strong>!</p>"
-            "<hr/>"
-            "<h2>HTTPS Upload Server</h2>"
-            "<p>POST data to /upload endpoint</p>"
-            "<form action=\"/upload\" method=\"post\" enctype=\"multipart/form-data\">"
-            "<input type=\"file\" name=\"file\"/>"
-            "<input type=\"submit\" value=\"Upload\"/>"
+            "<h1>Login</h1>"
+            "<p style=\"color:red;\">Invalid username or password. Please try again.</p>"
+            "<form action=\"/login\" method=\"post\">"
+            "<label>Username: <input type=\"text\" name=\"username\" required/></label><br/><br/>"
+            "<label>Password: <input type=\"password\" name=\"password\" required/></label><br/><br/>"
+            "<input type=\"submit\" value=\"Login\"/>"
             "</form>"
+            "<p><a href=\"/register\">Don&apos;t have an account? Register</a></p>"
+            "</body></html>";
+        return sendResponse(connection, page, MHD_HTTP_UNAUTHORIZED);
+    }
+
+    // ── Password OK: check if TOTP is provisioned ────────────────────────────
+    std::string totp_secret;
+    bool has_totp = false;
+    if (s_user_auth) {
+        has_totp = s_user_auth->getTotpSecret(username, totp_secret);
+    }
+
+    if (!has_totp) {
+        // No TOTP secret: legacy path – grant session directly (no MFA)
+        std::cout << "[Login] User '" << username << "' has no TOTP – granting session (no MFA)\n";
+        std::string page =
+            "<html><body><h1>Login Successful (No MFA)</h1>"
+            "<p>Welcome back, <strong>" + username + "</strong>.</p>"
+            "<p style=\"color:orange;\">No TOTP key configured. Please re-register to enable MFA.</p>"
             "</body></html>";
         return sendResponse(connection, page, MHD_HTTP_OK);
     }
 
-    std::cout << "[Login] Failed login attempt for user: " << username << std::endl;
-    page =
-        "<html><body>"
-        "<h1>Login</h1>"
-        "<p style=\"color:red;\">Invalid username or password. Please try again.</p>"
-        "<form action=\"/login\" method=\"post\">"
-        "<label>Username: <input type=\"text\" name=\"username\" required/></label><br/><br/>"
-        "<label>Password: <input type=\"password\" name=\"password\" required/></label><br/><br/>"
-        "<input type=\"submit\" value=\"Login\"/>"
-        "</form>"
-        "<p><a href=\"/register\">Don&apos;t have an account? Register</a></p>"
+    // ── Create OTP session ───────────────────────────────────────────────────
+    std::string session_id = BlockchainLogger::generateSessionId();
+    if (session_id.empty()) {
+        std::cerr << "[Login] Failed to generate session ID\n";
+        return sendResponse(connection, "<html><body><p>Internal error.</p></body></html>",
+                            MHD_HTTP_INTERNAL_SERVER_ERROR);
+    }
+
+    PendingOTP pending;
+    pending.username    = username;
+    pending.totp_secret = totp_secret;
+    pending.session_id  = session_id;
+    pending.expires_at  = std::time(nullptr) + OTP_SESSION_TTL;
+    pending.local_fails = 0;
+
+    pthread_mutex_lock(&s_session_mutex);
+    s_sessions[session_id] = pending;
+    pthread_mutex_unlock(&s_session_mutex);
+
+    // Log OTP_SENT to blockchain (session_id links all events in this attempt)
+    if (s_blockchain) {
+        s_blockchain->logEvent(username, BlockchainLogger::OTP_SENT, session_id);
+    }
+
+    std::cout << "[Login] Password OK for '" << username << "' – OTP phase started\n";
+
+    // ── Build redirect response with session cookie ──────────────────────────
+    std::string body_html =
+        "<html><head>"
+        "<meta http-equiv=\"refresh\" content=\"0;url=/otp\"/>"
+        "</head><body>"
+        "<p>Redirecting to OTP verification...</p>"
         "</body></html>";
-    return sendResponse(connection, page, MHD_HTTP_UNAUTHORIZED);
+
+    struct MHD_Response* resp = MHD_create_response_from_buffer(
+        body_html.size(),
+        const_cast<char*>(body_html.c_str()),
+        MHD_RESPMEM_MUST_COPY);
+
+    // Set Secure HttpOnly SameSite=Strict cookie for the OTP session
+    std::string cookie = "iotgw_session=" + session_id +
+                         "; HttpOnly; Secure; SameSite=Strict; Path=/otp; Max-Age=120";
+    MHD_add_response_header(resp, "Set-Cookie", cookie.c_str());
+    MHD_add_response_header(resp, "Content-Type", "text/html");
+
+    MHD_Result ret = MHD_queue_response(connection, MHD_HTTP_SEE_OTHER, resp);
+    MHD_destroy_response(resp);
+    return ret;
 }
 
 // Handle POST /otp
@@ -611,43 +956,186 @@ MHD_Result HttpsServer::handleOtpPost(struct MHD_Connection* connection,
         return MHD_YES;
     }
 
+    // ── Live blockchain connectivity check (blocking: reveal() requires chain)
+    {
+        std::string bc_err;
+        bool bc_ok = s_blockchain && s_blockchain->checkConnectivity(bc_err);
+        if (!bc_ok) {
+            if (bc_err.empty()) bc_err = "Blockchain logger not initialised.";
+            std::cerr << "[OTP] Blockchain unreachable: " << bc_err << "\n";
+            return sendResponse(connection,
+                buildBlockchainErrorPage(bc_err, "/login"),
+                MHD_HTTP_SERVICE_UNAVAILABLE);
+        }
+    }
+
+    purgeExpiredSessions();
+
+    // ── Read session cookie ──────────────────────────────────────────────────
+    std::string session_id = readSessionCookie(connection);
+    if (session_id.empty()) {
+        return sendResponse(connection,
+            "<html><body><h1>Session Error</h1>"
+            "<p>No session found. Please <a href='/login'>log in again</a>.</p>"
+            "</body></html>", MHD_HTTP_UNAUTHORIZED);
+    }
+
+    // ── Look up pending OTP session ──────────────────────────────────────────
+    pthread_mutex_lock(&s_session_mutex);
+    auto sit = s_sessions.find(session_id);
+    if (sit == s_sessions.end()) {
+        pthread_mutex_unlock(&s_session_mutex);
+        return sendResponse(connection,
+            "<html><body><h1>Session Expired</h1>"
+            "<p>Your OTP session has expired. Please <a href='/login'>log in again</a>.</p>"
+            "</body></html>", MHD_HTTP_UNAUTHORIZED);
+    }
+    PendingOTP pending = sit->second;  // copy under lock
+    pthread_mutex_unlock(&s_session_mutex);
+
+    // Check wall-clock expiry
+    if (std::time(nullptr) > pending.expires_at) {
+        pthread_mutex_lock(&s_session_mutex);
+        s_sessions.erase(session_id);
+        pthread_mutex_unlock(&s_session_mutex);
+        return sendResponse(connection,
+            "<html><body><h1>OTP Expired</h1>"
+            "<p>The OTP window has expired. Please <a href='/login'>log in again</a>.</p>"
+            "</body></html>", MHD_HTTP_UNAUTHORIZED);
+    }
+
+    // ── Local fail-count fast-path lockout ───────────────────────────────────
+    if (pending.local_fails >= MAX_LOCAL_OTP_FAILS) {
+        pthread_mutex_lock(&s_session_mutex);
+        s_sessions.erase(session_id);
+        pthread_mutex_unlock(&s_session_mutex);
+        return sendResponse(connection,
+            "<html><body><h1>Account Locked</h1>"
+            "<p>Too many failed OTP attempts. Contact an administrator.</p>"
+            "</body></html>", MHD_HTTP_FORBIDDEN);
+    }
+
+    // ── Query blockchain lockout (authoritative) ─────────────────────────────
+    if (s_blockchain && s_blockchain->isUserLocked(pending.username)) {
+        pthread_mutex_lock(&s_session_mutex);
+        s_sessions.erase(session_id);
+        pthread_mutex_unlock(&s_session_mutex);
+        std::cerr << "[OTP] User '" << pending.username << "' is locked on-chain\n";
+        return sendResponse(connection,
+            "<html><body><h1>Account Locked</h1>"
+            "<p>Your account is locked on the blockchain. Contact an administrator to unlock.</p>"
+            "</body></html>", MHD_HTTP_FORBIDDEN);
+    }
+
+    // ── Parse OTP from form body ─────────────────────────────────────────────
     UploadData* body = con_info->getUploadData();
     std::string body_str = (body && body->getSize() > 0)
         ? std::string(body->getData(), body->getSize()) : "";
-
     std::string otp = getFormField(body_str, "otp");
 
-    std::cout << "[OTP] Received OTP input: " << otp << std::endl;
+    // Structural validation
+    bool fmt_ok = (otp.size() == 6);
+    for (char c : otp) if (!std::isdigit(static_cast<unsigned char>(c))) { fmt_ok = false; break; }
 
-    // Validate: must be exactly 6 digits
-    bool valid = (otp.length() == 6);
-    for (char c : otp) {
-        if (!std::isdigit(static_cast<unsigned char>(c))) { valid = false; break; }
-    }
-
-    if (!valid) {
+    if (!fmt_ok) {
         std::string page =
-            "<html><body>"
-            "<h1>OTP Verification</h1>"
-            "<p style='color:red;'>Invalid OTP. Please enter exactly 6 digits.</p>"
+            "<html><body><h1>OTP Verification</h1>"
+            "<p style='color:red;'>Invalid OTP format. Enter exactly 6 digits.</p>"
             "<form action='/otp' method='post'>"
-            "<label>OTP: <input type='text' name='otp' maxlength='6' "
-            "pattern='[0-9]{6}' placeholder='000000' required "
-            "style='font-size:1.5em; letter-spacing:0.3em; width:8em;'/></label><br/><br/>"
+            "<label>OTP: <input type='text' name='otp' maxlength='6' pattern='[0-9]{6}' "
+            "placeholder='000000' required style='font-size:1.5em;letter-spacing:0.3em;width:8em;'/>"
+            "</label><br/><br/>"
             "<input type='submit' value='Verify OTP'/>"
             "</form>"
-            "<p><a href='/login'>Back to Login</a></p>"
-            "</body></html>";
+            "<p><a href='/login'>Back to Login</a></p></body></html>";
         return sendResponse(connection, page, MHD_HTTP_BAD_REQUEST);
     }
 
-    // OTP verification logic will be added here
-    std::string page =
-        "<html><body>"
-        "<h1>OTP Received</h1>"
-        "<p>OTP <strong>" + otp + "</strong> submitted. Verification pending.</p>"
+    // ── Verify TOTP (constant-time via OTPManager) ───────────────────────────
+    bool otp_ok = OTPManager::verifyTOTP(pending.totp_secret, otp);
+
+    if (!otp_ok) {
+        // Increment local fail count
+        pthread_mutex_lock(&s_session_mutex);
+        auto it2 = s_sessions.find(session_id);
+        if (it2 != s_sessions.end()) {
+            it2->second.local_fails++;
+            pending.local_fails = it2->second.local_fails;
+        }
+        pthread_mutex_unlock(&s_session_mutex);
+
+        // Log OTP_FAIL to blockchain
+        if (s_blockchain) {
+            s_blockchain->logEvent(pending.username, BlockchainLogger::OTP_FAIL, session_id);
+            // If local fails now >= max, also log LOCKOUT event
+            if (pending.local_fails >= MAX_LOCAL_OTP_FAILS) {
+                s_blockchain->logEvent(pending.username, BlockchainLogger::LOCKOUT, session_id);
+            }
+        }
+
+        std::cerr << "[OTP] Wrong OTP for '" << pending.username
+                  << "' (local fail " << pending.local_fails << "/" << MAX_LOCAL_OTP_FAILS << ")\n";
+
+        int remaining = MAX_LOCAL_OTP_FAILS - pending.local_fails;
+        std::string page =
+            "<html><body><h1>OTP Verification</h1>"
+            "<p style='color:red;'>Incorrect OTP. " +
+            std::to_string(remaining) + " attempt(s) remaining.</p>"
+            "<form action='/otp' method='post'>"
+            "<label>OTP: <input type='text' name='otp' maxlength='6' pattern='[0-9]{6}' "
+            "placeholder='000000' required style='font-size:1.5em;letter-spacing:0.3em;width:8em;'/>"
+            "</label><br/><br/>"
+            "<input type='submit' value='Verify OTP'/>"
+            "</form>"
+            "<p><a href='/login'>Back to Login</a></p></body></html>";
+        return sendResponse(connection, page, MHD_HTTP_UNAUTHORIZED);
+    }
+
+    // ── OTP correct: log success and grant session ───────────────────────────
+    if (s_blockchain) {
+        s_blockchain->logEvent(pending.username, BlockchainLogger::OTP_SUCCESS, session_id);
+    }
+
+    // Remove the one-time OTP session
+    pthread_mutex_lock(&s_session_mutex);
+    s_sessions.erase(session_id);
+    pthread_mutex_unlock(&s_session_mutex);
+
+    std::cout << "[OTP] SUCCESS for user '" << pending.username
+              << "' – session_id=" << session_id.substr(0, 16) << "...\n";
+
+    // ── Grant authenticated session (dashboard) ──────────────────────────────
+    std::string dashboard =
+        "<html><head><title>Dashboard – RaceIoT Gateway</title></head><body>"
+        "<h1>Login Successful</h1>"
+        "<p>Welcome, <strong>" + pending.username + "</strong>! "
+        "Identity verified by TOTP and recorded on the blockchain.</p>"
+        "<p><small>Blockchain session ID: " + session_id.substr(0, 16) + "...</small></p>"
+        "<hr/>"
+        "<h2>IoT Gateway Dashboard</h2>"
+        "<h3>Firmware Upload</h3>"
+        "<form action=\"/upload\" method=\"post\" enctype=\"multipart/form-data\">"
+        "<input type=\"file\" name=\"file\"/>"
+        "<input type=\"submit\" value=\"Upload\"/>"
+        "</form>"
+        "<h3>LED Control</h3>"
+        "<p><a href=\"/startledblink?speed=5\">Blink 5s</a> | "
+        "<a href=\"/startledblink?speed=1\">Blink 1s</a> | "
+        "<a href=\"/stopledblink\">Stop LED</a></p>"
+        "<hr/><p><a href=\"/login\">Log Out</a></p>"
         "</body></html>";
-    return sendResponse(connection, page, MHD_HTTP_OK);
+
+    // Clear the OTP session cookie
+    struct MHD_Response* resp = MHD_create_response_from_buffer(
+        dashboard.size(),
+        const_cast<char*>(dashboard.c_str()),
+        MHD_RESPMEM_MUST_COPY);
+    MHD_add_response_header(resp, "Set-Cookie",
+        "iotgw_session=; HttpOnly; Secure; SameSite=Strict; Path=/otp; Max-Age=0");
+    MHD_add_response_header(resp, "Content-Type", "text/html");
+    MHD_Result ret = MHD_queue_response(connection, MHD_HTTP_OK, resp);
+    MHD_destroy_response(resp);
+    return ret;
 }
 
 // Handle LED control request

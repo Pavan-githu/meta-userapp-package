@@ -3,8 +3,8 @@ DESCRIPTION = "Unified application combining LED control and HTTPS firmware down
 LICENSE = "MIT"
 LIC_FILES_CHKSUM = "file://${COMMON_LICENSE_DIR}/MIT;md5=0835ade698e0bcf8506ecda2f7b4f302"
 
-DEPENDS = "libmicrohttpd gnutls libgpiod openssl"
-RDEPENDS:${PN} = "libmicrohttpd gnutls openssl iw wpa-supplicant libgpiod"
+DEPENDS = "libmicrohttpd gnutls libgpiod openssl curl"
+RDEPENDS:${PN} = "libmicrohttpd gnutls openssl iw wpa-supplicant libgpiod curl"
 
 SRCREV = "${AUTOREV}"
 SRC_URI = "git://github.com/Pavan-githu/meta-userapp-package.git;branch=feature/MFAblockchain;protocol=https"
@@ -19,14 +19,19 @@ SYSTEMD_AUTO_ENABLE = "enable"
 do_compile() {
     # Compile unified IoT gateway application
     cd ${S}/recipes-apps/iot-gateway/files
-    ${CXX} ${CXXFLAGS} -std=c++11 -pthread -c blink.cpp -o blink.o
+    ${CXX} ${CXXFLAGS} -std=c++11 -pthread -c keccak256.cpp   -o keccak256.o
+    ${CXX} ${CXXFLAGS} -std=c++11 -pthread -c otp_manager.cpp -o otp_manager.o
+    ${CXX} ${CXXFLAGS} -std=c++11 -pthread -c blockchain_logger.cpp -o blockchain_logger.o
+    ${CXX} ${CXXFLAGS} -std=c++11 -pthread -c blink.cpp        -o blink.o
     ${CXX} ${CXXFLAGS} -std=c++11 -pthread -c https_server.cpp -o https_server.o
-    ${CXX} ${CXXFLAGS} -std=c++11 -pthread -c certificate.cpp -o certificate.o
+    ${CXX} ${CXXFLAGS} -std=c++11 -pthread -c certificate.cpp  -o certificate.o
     ${CXX} ${CXXFLAGS} -std=c++11 -pthread -c wifi_manager.cpp -o wifi_manager.o
-    ${CXX} ${CXXFLAGS} -std=c++11 -pthread -c user_auth.cpp -o user_auth.o
-    ${CXX} ${CXXFLAGS} -std=c++11 -pthread -c main.cpp -o main.o
-    ${CXX} ${CXXFLAGS} -pthread -o iot-gateway main.o blink.o https_server.o certificate.o wifi_manager.o user_auth.o \
-        ${LDFLAGS} -lmicrohttpd -lgnutls -lgpiod -lssl -lcrypto
+    ${CXX} ${CXXFLAGS} -std=c++11 -pthread -c user_auth.cpp    -o user_auth.o
+    ${CXX} ${CXXFLAGS} -std=c++11 -pthread -c main.cpp         -o main.o
+    ${CXX} ${CXXFLAGS} -pthread -o iot-gateway \
+        main.o blink.o https_server.o certificate.o wifi_manager.o \
+        user_auth.o keccak256.o otp_manager.o blockchain_logger.o \
+        ${LDFLAGS} -lmicrohttpd -lgnutls -lgpiod -lssl -lcrypto -lcurl
 }
 
 do_install() {

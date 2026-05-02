@@ -1,4 +1,5 @@
 #include "user_auth.h"
+#include "otp_manager.h"
 
 #include <openssl/evp.h>    // EVP_sha256, PKCS5_PBKDF2_HMAC
 #include <openssl/rand.h>   // RAND_bytes
@@ -71,12 +72,21 @@ bool UserAuth::registerUser(const std::string& username,
         return false;
     }
 
+    // Generate TOTP shared secret for this user (RFC 6238)
+    std::string totp_secret = OTPManager::generateSecret();
+    if (totp_secret.empty()) {
+        pthread_mutex_unlock(&mutex_);
+        std::cerr << "[UserAuth] registerUser: TOTP secret generation failed\n";
+        return false;
+    }
+
     UserRecord rec;
-    rec.username   = username;
-    rec.salt_hex   = salt_hex;
-    rec.hash_hex   = hash_hex;
-    rec.role       = role;
-    rec.created_at = std::time(nullptr);
+    rec.username    = username;
+    rec.salt_hex    = salt_hex;
+    rec.hash_hex    = hash_hex;
+    rec.role        = role;
+    rec.created_at  = std::time(nullptr);
+    rec.totp_secret = totp_secret;
 
     registry_.push_back(rec);
     bool ok = saveRegistry();
@@ -85,7 +95,7 @@ bool UserAuth::registerUser(const std::string& username,
 
     if (ok) {
         std::cout << "[UserAuth] Registered user '" << username
-                  << "' (role=" << role << ")\n";
+                  << "' (role=" << role << ", totp_secret provisioned)\n";
     }
     return ok;
 }
@@ -111,8 +121,55 @@ bool UserAuth::authenticate(const std::string& username,
     }
 
     pthread_mutex_unlock(&mutex_);
+
+    // ── Timing-safe dummy PBKDF2 for unknown usernames ───────────────────────
+    // If we return immediately here, an attacker can enumerate valid usernames
+    // by measuring that unknown-user responses arrive ~300ms faster than
+    // wrong-password responses (no PBKDF2 ran).  Running a dummy PBKDF2 with
+    // a fixed salt makes both paths take the same time.
+    {
+        static const unsigned char DUMMY_SALT[SALT_BYTES] = {
+            0xde,0xad,0xbe,0xef,0xde,0xad,0xbe,0xef,
+            0xde,0xad,0xbe,0xef,0xde,0xad,0xbe,0xef
+        };
+        unsigned char dummy_out[HASH_BYTES];
+        PKCS5_PBKDF2_HMAC(
+            password.c_str(),
+            static_cast<int>(password.size()),
+            DUMMY_SALT,
+            SALT_BYTES,
+            PBKDF2_ITERATIONS,
+            EVP_sha256(),
+            HASH_BYTES,
+            dummy_out);
+        OPENSSL_cleanse(dummy_out, HASH_BYTES);
+    }
+
     std::cerr << "[UserAuth] Authentication FAILED: unknown user '"
               << username << "'\n";
+    return false;
+}
+
+// ---------------------------------------------------------------------------
+// Public – TOTP secret retrieval
+// ---------------------------------------------------------------------------
+
+bool UserAuth::getTotpSecret(const std::string& username,
+                              std::string& secret_out) const
+{
+    pthread_mutex_lock(&mutex_);
+    for (const auto& rec : registry_) {
+        if (rec.username == username) {
+            if (rec.totp_secret.empty()) {
+                pthread_mutex_unlock(&mutex_);
+                return false;
+            }
+            secret_out = rec.totp_secret;
+            pthread_mutex_unlock(&mutex_);
+            return true;
+        }
+    }
+    pthread_mutex_unlock(&mutex_);
     return false;
 }
 
@@ -459,7 +516,7 @@ bool UserAuth::isValidRole(const std::string& role)
 // Private – record serialisation / parsing
 // ---------------------------------------------------------------------------
 
-// Format:  username:salt_hex:hash_hex:role:created_at_unix
+// Format:  username:salt_hex:hash_hex:role:created_at_unix:totp_secret
 std::string UserAuth::serialiseRecord(const UserRecord& rec)
 {
     std::ostringstream oss;
@@ -467,7 +524,8 @@ std::string UserAuth::serialiseRecord(const UserRecord& rec)
         << rec.salt_hex    << ':'
         << rec.hash_hex    << ':'
         << rec.role        << ':'
-        << static_cast<long long>(rec.created_at);
+        << static_cast<long long>(rec.created_at) << ':'
+        << rec.totp_secret;  // may be empty for legacy records
     return oss.str();
 }
 
@@ -481,7 +539,7 @@ bool UserAuth::parseRecord(const std::string& line, UserRecord& rec)
         fields.push_back(token);
     }
 
-    if (fields.size() != 5) {
+    if (fields.size() < 5) {
         return false;
     }
 
@@ -499,6 +557,9 @@ bool UserAuth::parseRecord(const std::string& line, UserRecord& rec)
     } catch (...) {
         return false;
     }
+
+    // Field 6: TOTP secret (optional – empty for legacy records)
+    rec.totp_secret = (fields.size() >= 6) ? fields[5] : "";
 
     return isValidUsername(rec.username) && isValidRole(rec.role);
 }

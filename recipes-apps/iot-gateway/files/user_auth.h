@@ -10,11 +10,13 @@
 // UserRecord – one entry in the persistent user registry
 // -------------------------------------------------------------------------
 struct UserRecord {
-    std::string username;   // unique, alphanumeric + '_', max 64 chars
-    std::string salt_hex;   // 32 hex chars  (16 raw bytes)
-    std::string hash_hex;   // 64 hex chars  (32 raw bytes, PBKDF2-HMAC-SHA256)
-    std::string role;       // "admin" | "user"
-    std::time_t created_at; // Unix timestamp
+    std::string username;     // unique, alphanumeric + '_', max 64 chars
+    std::string salt_hex;     // 32 hex chars  (16 raw bytes)
+    std::string hash_hex;     // 64 hex chars  (32 raw bytes, PBKDF2-HMAC-SHA256)
+    std::string role;         // "admin" | "user"
+    std::time_t created_at;   // Unix timestamp
+    std::string totp_secret;  // base32-encoded 160-bit TOTP secret (RFC 6238)
+                              // empty string = TOTP not yet provisioned
 };
 
 // -------------------------------------------------------------------------
@@ -51,9 +53,16 @@ public:
 
     // Register a new user.  Returns false if the username already exists,
     // if the password is too short, or if username contains invalid chars.
+    // A TOTP secret is generated automatically and stored in the registry.
     bool registerUser(const std::string& username,
                       const std::string& password,
                       const std::string& role = "user");
+
+    // Retrieve the base32 TOTP secret for username.
+    // Returns true and populates secret_out if the user exists and has a TOTP
+    // secret provisioned.  Returns false otherwise.
+    bool getTotpSecret(const std::string& username,
+                       std::string& secret_out) const;
 
     // Verify username/password against the stored hash.
     // Returns true only when both username exists and hash matches.
