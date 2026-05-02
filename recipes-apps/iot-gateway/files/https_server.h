@@ -158,8 +158,10 @@ private:
                                    const std::string& content, 
                                    int status_code);
 
+public:
     // ------------------------------------------------------------------
-    // Static MFA state  (protected by s_session_mutex)
+    // Static MFA state  (public so free helper functions in the .cpp
+    // such as purgeExpiredSessions() can access them without friendship)
     // ------------------------------------------------------------------
     static UserAuth*                          s_user_auth;
     static BlockchainLogger*                  s_blockchain;

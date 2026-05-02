@@ -425,6 +425,10 @@ MHD_Result HttpsServer::handlePostUpload(struct MHD_Connection* connection,
     }
 }
 
+// Forward declarations for helpers defined later in this file
+static std::string buildBlockchainErrorPage(const std::string& reason, const std::string& backUrl);
+static std::string blockchainStatusBanner(bool statusOk, const std::string& detail);
+
 // Handle GET request
 MHD_Result HttpsServer::handleGetRequest(struct MHD_Connection* connection, const char* url) {
 

@@ -113,8 +113,11 @@ private:
                                   unsigned char* out,
                                   size_t out_len);
 
-    // Validation helpers
+    // Validation helpers (isValidUsername is public so https_server.cpp
+    // can call it before authenticate() to reject malformed input early)
+public:
     static bool isValidUsername(const std::string& username);
+private:
     static bool isValidRole(const std::string& role);
 
     // Parse / serialise a single registry line
