@@ -34,8 +34,9 @@ bool CertificateManager::executeCommand(const std::string& command) {
 }
 
 bool CertificateManager::fileExists(const std::string& path) {
-    std::ifstream file(path);
-    return file.good();
+    struct stat st;
+    if (stat(path.c_str(), &st) != 0) return false;
+    return S_ISREG(st.st_mode) && st.st_size > 0;
 }
 
 bool CertificateManager::createDirectory(const std::string& path) {

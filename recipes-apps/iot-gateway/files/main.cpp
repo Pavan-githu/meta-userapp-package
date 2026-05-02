@@ -249,10 +249,14 @@ void* httpsServerThread(void* arg) {
             if (eq == std::string::npos) continue;
             std::string key = line.substr(0, eq);
             std::string val = line.substr(eq + 1);
-            if      (key == "BLOCKCHAIN_RPC_URL")      bc_rpc      = val;
-            else if (key == "BLOCKCHAIN_CONTRACT")     bc_contract = val;
-            else if (key == "BLOCKCHAIN_DEVICE_ADDR")  bc_device   = val;
-            else if (key == "BLOCKCHAIN_CHAIN_ID")     bc_chain    = std::stoull(val);
+            // Strip trailing whitespace/CR from value
+            while (!val.empty() && (val.back() == ' ' || val.back() == '\r' || val.back() == '\t'))
+                val.pop_back();
+            if      (key == "BLOCKCHAIN_RPC_URL")             bc_rpc      = val;
+            else if (key == "BLOCKCHAIN_AUTHLOG_CONTRACT")    bc_contract = val;
+            else if (key == "BLOCKCHAIN_CONTRACT")            bc_contract = val; // legacy
+            else if (key == "BLOCKCHAIN_DEVICE_ADDR")         bc_device   = val;
+            else if (key == "BLOCKCHAIN_CHAIN_ID")            bc_chain    = std::stoull(val);
         }
     } else {
         std::cerr << "[HTTPS] /etc/iot-gateway/blockchain.conf not found – "
