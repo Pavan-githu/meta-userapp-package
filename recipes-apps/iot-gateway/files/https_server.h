@@ -7,6 +7,7 @@
 #include <map>
 #include <pthread.h>
 #include <microhttpd.h>
+#include <vector>
 
 // Forward declarations – avoid pulling heavy headers into this header
 class UserAuth;
