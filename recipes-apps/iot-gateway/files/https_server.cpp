@@ -22,7 +22,8 @@
 // ---------------------------------------------------------------------------
 UserAuth*                          HttpsServer::s_user_auth    = nullptr;
 BlockchainLogger*                  HttpsServer::s_blockchain   = nullptr;
-std::map<std::string, PendingOTP>  HttpsServer::s_sessions;
+std::map<std::string, PendingOTP>         HttpsServer::s_sessions;
+std::map<std::string, PasswordFailRecord> HttpsServer::s_pass_fails;
 pthread_mutex_t                    HttpsServer::s_session_mutex = PTHREAD_MUTEX_INITIALIZER;
 std::vector<std::string>           HttpsServer::s_activity_log;
 
@@ -904,6 +905,23 @@ MHD_Result HttpsServer::handleLoginPost(struct MHD_Connection* connection,
             MHD_HTTP_BAD_REQUEST);
     }
 
+    // ── Check password lockout (local, first factor) ─────────────────────────
+    {
+        pthread_mutex_lock(&s_session_mutex);
+        auto pf = s_pass_fails.find(username);
+        if (pf != s_pass_fails.end() && pf->second.locked) {
+            pthread_mutex_unlock(&s_session_mutex);
+            addActivityLog("[LOGIN] Account locked (password) for '" + username + "'");
+            return sendResponse(connection,
+                "<html><body><h1>Account Locked</h1>"
+                "<p>Too many failed password attempts. Contact an administrator.</p>"
+                "<p><a href='/login'>Back to Login</a></p>"
+                "</body></html>",
+                MHD_HTTP_FORBIDDEN);
+        }
+        pthread_mutex_unlock(&s_session_mutex);
+    }
+
     // ── Verify password ─────────────────────────────────────────────────────
     bool auth_ok = false;
     if (s_user_auth) {
@@ -930,11 +948,34 @@ MHD_Result HttpsServer::handleLoginPost(struct MHD_Connection* connection,
         : "[LOGIN] FAILED password for '" + username + "'");
 
     if (!auth_ok) {
-        std::cerr << "[Login] Failed password attempt for user: " << username << "\n";
+        // Increment password fail counter
+        pthread_mutex_lock(&s_session_mutex);
+        auto& rec = s_pass_fails[username];
+        rec.count++;
+        if (rec.count >= MAX_PASSWORD_FAILS)
+            rec.locked = true;
+        int pw_remaining = MAX_PASSWORD_FAILS - rec.count;
+        pthread_mutex_unlock(&s_session_mutex);
+
+        std::cerr << "[Login] Failed password attempt for user: " << username
+                  << " (" << rec.count << "/" << MAX_PASSWORD_FAILS << ")\n";
+        addActivityLog("[LOGIN] FAILED password for '" + username + "' ("
+            + std::to_string(rec.count) + "/" + std::to_string(MAX_PASSWORD_FAILS) + ")");
+
+        if (pw_remaining <= 0) {
+            return sendResponse(connection,
+                "<html><body><h1>Account Locked</h1>"
+                "<p>Too many failed password attempts. Contact an administrator.</p>"
+                "<p><a href='/login'>Back to Login</a></p>"
+                "</body></html>",
+                MHD_HTTP_FORBIDDEN);
+        }
+
         std::string page =
             "<html><body>"
             "<h1>Login</h1>"
-            "<p style=\"color:red;\">Invalid username or password. Please try again.</p>"
+            "<p style=\"color:red;\">Invalid username or password. "
+            + std::to_string(pw_remaining) + " attempt(s) remaining.</p>"
             "<form action=\"/login\" method=\"post\">"
             "<label>Username: <input type=\"text\" name=\"username\" required/></label><br/><br/>"
             "<label>Password: <input type=\"password\" name=\"password\" required/></label><br/><br/>"
@@ -944,6 +985,11 @@ MHD_Result HttpsServer::handleLoginPost(struct MHD_Connection* connection,
             "</body></html>";
         return sendResponse(connection, page, MHD_HTTP_UNAUTHORIZED);
     }
+
+    // ── Password OK: reset fail counter ─────────────────────────────────────
+    pthread_mutex_lock(&s_session_mutex);
+    s_pass_fails.erase(username);
+    pthread_mutex_unlock(&s_session_mutex);
 
     // ── Password OK: check if TOTP is provisioned ────────────────────────────
     std::string totp_secret;

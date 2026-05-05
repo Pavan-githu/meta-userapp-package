@@ -32,6 +32,16 @@ struct PendingOTP {
 static const int OTP_SESSION_TTL = 120;
 // Max local OTP failures before refusing to check blockchain (fast path)
 static const int MAX_LOCAL_OTP_FAILS = 3;
+// Max password failures before account is locally locked (first factor)
+static const int MAX_PASSWORD_FAILS = 3;
+
+// ---------------------------------------------------------------------------
+// PasswordFailRecord – tracks consecutive password failures per username
+// ---------------------------------------------------------------------------
+struct PasswordFailRecord {
+    int  count;       // number of consecutive failed password attempts
+    bool locked;      // true after count reaches MAX_PASSWORD_FAILS
+};
 
 // Class to hold uploaded data with dynamic memory management
 class UploadData {
@@ -166,9 +176,10 @@ public:
     // ------------------------------------------------------------------
     static UserAuth*                          s_user_auth;
     static BlockchainLogger*                  s_blockchain;
-    static std::map<std::string, PendingOTP>  s_sessions;     // key = session_id
-    static pthread_mutex_t                    s_session_mutex;
-    static std::map<std::string, std::string> user_db;        // legacy fallback
+    static std::map<std::string, PendingOTP>         s_sessions;      // key = session_id
+    static std::map<std::string, PasswordFailRecord>  s_pass_fails;    // key = username
+    static pthread_mutex_t                            s_session_mutex;
+    static std::map<std::string, std::string>         user_db;         // legacy fallback
 
     // In-memory blockchain activity log (last 20 events, newest first)
     static std::vector<std::string>           s_activity_log;
