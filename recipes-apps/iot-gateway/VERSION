@@ -1,0 +1,11 @@
+0.1.0
+
+Release: Initial Production Release
+Date: 2026-05-09
+Description:
+  First stable release of the IoT Gateway application for Raspberry Pi 3.
+  Includes LED blink control, HTTPS firmware download server, Wi-Fi manager,
+  OTP-based multi-factor authentication, blockchain activity logger using
+  Keccak-256, user authentication, and TLS certificate management.
+  Firmware image is signed via Google Cloud KMS HSM (RSA-PSS 2048-bit)
+  and registered on the Polygon Amoy blockchain for tamper-proof verification.

@@ -3,11 +3,19 @@ DESCRIPTION = "Unified application combining LED control and HTTPS firmware down
 LICENSE = "MIT"
 LIC_FILES_CHKSUM = "file://${COMMON_LICENSE_DIR}/MIT;md5=0835ade698e0bcf8506ecda2f7b4f302"
 
+# Version is read from recipes-apps/iot-gateway/VERSION — the single source
+# of truth for the iot-gateway application version.
+# The VERSION file contains the version on line 1 followed by a human-readable
+# release description. Only the first line is used as PV.
+# To release a new version: edit that file, bump line 1, update the description.
+PV = "${@open('${LAYERDIR}/recipes-apps/iot-gateway/VERSION').readline().strip()}"
+
 DEPENDS = "libmicrohttpd gnutls libgpiod openssl curl"
 RDEPENDS:${PN} = "libmicrohttpd gnutls openssl iw wpa-supplicant libgpiod curl"
 
 SRCREV = "${AUTOREV}"
-SRC_URI = "git://github.com/Pavan-githu/meta-userapp-package.git;branch=feature/MFAblockchain;protocol=https"
+SRC_URI = "git://github.com/Pavan-githu/meta-userapp-package.git;branch=feature/MFAblockchain;protocol=https \
+           file://VERSION"
 
 S = "${WORKDIR}/git"
 
@@ -48,9 +56,14 @@ do_install() {
     # Install systemd service
     install -d ${D}${systemd_system_unitdir}
     install -m 0644 ${S}/recipes-apps/iot-gateway/files/iot-gateway.service ${D}${systemd_system_unitdir}/
+
+    # Bake application version onto the device
+    install -d ${D}${sysconfdir}
+    echo "${PV}" > ${D}${sysconfdir}/iot-gateway-version
 }
 
 FILES:${PN} += "${bindir}/iot-gateway"
 FILES:${PN} += "${sysconfdir}/https-server"
 FILES:${PN} += "${sysconfdir}/iot-gateway"
+FILES:${PN} += "${sysconfdir}/iot-gateway-version"
 FILES:${PN} += "${systemd_system_unitdir}/iot-gateway.service"
