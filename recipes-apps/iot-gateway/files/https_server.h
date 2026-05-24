@@ -96,13 +96,21 @@ private:
     struct MHD_Daemon* daemon;
     char* cert_pem;
     char* key_pem;
+    // Root CA PEM loaded for mTLS: device verifies the client certificate
+    // presented by cloudflared on every inbound TLS handshake.
+    // Null when mTLS client-cert enforcement is disabled.
+    char* trust_pem;
     int port;
     bool running = false;
     std::string bind_address;
-    
+
     // Private methods
     bool loadCertificate(const char* cert_file);
     bool loadKey(const char* key_file);
+    // Load Root CA PEM for mTLS client-cert verification.
+    // Returns true on success; sets trust_pem to nullptr and logs a warning
+    // on failure so the server can still start without mTLS enforcement.
+    bool loadTrustCA(const char* ca_file);
     void cleanup();
     std::string getLocalIPAddress();
 
@@ -115,7 +123,12 @@ public:
     HttpsServer& operator=(const HttpsServer&) = delete;
     
     // Server control methods
-    bool start(const char* cert_file, const char* key_file);
+    // cert_file / key_file  : server identity (existing)
+    // trust_ca_file         : Root CA PEM used to verify the cloudflared client
+    //                         certificate (mTLS Level 2). Pass nullptr to skip
+    //                         client-cert enforcement (development/fallback mode).
+    bool start(const char* cert_file, const char* key_file,
+               const char* trust_ca_file = nullptr);
     void stop();
     bool isRunning() const { return running; }
     int getPort() const { return port; }

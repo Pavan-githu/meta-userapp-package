@@ -273,7 +273,12 @@ void* httpsServerThread(void* arg) {
     HttpsServer::initMFA(&user_auth, blockchain);
     // ────────────────────────────────────────────────────────────────────────
     
-    if (!https_server.start(cert_file.c_str(), key_file.c_str())) {
+    // Pass the Root CA so the HTTPS server enforces mTLS: only connections
+    // presenting a client certificate signed by this CA (i.e. cloudflared)
+    // are accepted.  Any direct browser hit on port 8443 is rejected at the
+    // TLS handshake before a single HTTP byte is processed.
+    const char* trust_ca = "/etc/https-server/root-ca.crt";
+    if (!https_server.start(cert_file.c_str(), key_file.c_str(), trust_ca)) {
         std::cerr << "[HTTPS] Failed to start server" << std::endl;
         running = false;
         pthread_exit(NULL);

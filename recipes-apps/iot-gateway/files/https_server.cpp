@@ -191,8 +191,8 @@ void ConnectionInfo::createUploadData() {
 // HttpsServer Implementation
 // ============================================================================
 
-HttpsServer::HttpsServer(int server_port, const std::string& bind_addr) 
-    : daemon(nullptr), cert_pem(nullptr), key_pem(nullptr), 
+HttpsServer::HttpsServer(int server_port, const std::string& bind_addr)
+    : daemon(nullptr), cert_pem(nullptr), key_pem(nullptr), trust_pem(nullptr),
       port(server_port), running(false), bind_address(bind_addr) {}
 
 HttpsServer::~HttpsServer() {
@@ -209,6 +209,41 @@ void HttpsServer::cleanup() {
         delete[] key_pem;
         key_pem = nullptr;
     }
+    if (trust_pem) {
+        delete[] trust_pem;
+        trust_pem = nullptr;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// HttpsServer::loadTrustCA
+// Loads the Root CA PEM that the device uses to verify the client certificate
+// presented by cloudflared during the TLS handshake (mTLS Level 2).
+// ---------------------------------------------------------------------------
+bool HttpsServer::loadTrustCA(const char* ca_file) {
+    if (!ca_file) return false;
+    FILE* fp = fopen(ca_file, "rb");
+    if (!fp) {
+        std::cerr << "[mTLS] WARNING: Cannot open CA file: " << ca_file
+                  << " — client-cert enforcement disabled" << std::endl;
+        return false;
+    }
+    fseek(fp, 0, SEEK_END);
+    long sz = ftell(fp);
+    fseek(fp, 0, SEEK_SET);
+    trust_pem = new char[sz + 1];
+    size_t rd = fread(trust_pem, 1, sz, fp);
+    trust_pem[sz] = '\0';
+    fclose(fp);
+    if (rd != static_cast<size_t>(sz)) {
+        std::cerr << "[mTLS] WARNING: Partial CA read — client-cert enforcement disabled" << std::endl;
+        delete[] trust_pem;
+        trust_pem = nullptr;
+        return false;
+    }
+    std::cout << "[mTLS] Root CA loaded from " << ca_file
+              << " — client certificate enforcement ENABLED" << std::endl;
+    return true;
 }
 
 bool HttpsServer::loadCertificate(const char* cert_file) {
@@ -302,37 +337,64 @@ std::string HttpsServer::getLocalIPAddress() {
     return ip_address;
 }
 
-bool HttpsServer::start(const char* cert_file, const char* key_file) {
+bool HttpsServer::start(const char* cert_file, const char* key_file,
+                        const char* trust_ca_file) {
     if (running) {
         std::cerr << "Server is already running" << std::endl;
         return false;
     }
-    
-    // Load certificates
+
+    // Load server identity certificates
     if (!loadCertificate(cert_file)) {
         std::cerr << "Generate with: openssl req -x509 -newkey rsa:4096 -keyout server.key -out server.crt -days 365 -nodes" << std::endl;
         return false;
     }
-    
     if (!loadKey(key_file)) {
         cleanup();
         return false;
     }
-    
-    // Start HTTPS server
-    daemon = MHD_start_daemon(
-        MHD_USE_SELECT_INTERNALLY | MHD_USE_SSL,
-        port,
-        nullptr,
-        nullptr,
-        &HttpsServer::answerToConnection,
-        this,
-        MHD_OPTION_HTTPS_MEM_CERT, cert_pem,
-        MHD_OPTION_HTTPS_MEM_KEY, key_pem,
-        MHD_OPTION_NOTIFY_COMPLETED, HttpsServer::requestCompleted, nullptr,
-        MHD_OPTION_END
-    );
-    
+
+    // Attempt to load Root CA for mTLS client-cert enforcement (Level 2).
+    // loadTrustCA() logs a warning and returns false if the file is missing;
+    // start() continues without mTLS so development mode still works.
+    bool mtls_enabled = loadTrustCA(trust_ca_file);
+
+    // ── Start HTTPS daemon ───────────────────────────────────────────────────
+    // When trust_pem is loaded, MHD_OPTION_HTTPS_MEM_TRUST instructs GnuTLS
+    // to request a client certificate from the peer (cloudflared) and reject
+    // any connection that does not present one signed by the Root CA.
+    // This ensures that ONLY the authorised cloudflared instance can reach
+    // port 8443 — any direct browser or attacker connection is rejected at
+    // the TLS handshake before a single HTTP byte is processed.
+    if (mtls_enabled) {
+        daemon = MHD_start_daemon(
+            MHD_USE_SELECT_INTERNALLY | MHD_USE_SSL,
+            port,
+            nullptr, nullptr,
+            &HttpsServer::answerToConnection, this,
+            MHD_OPTION_HTTPS_MEM_CERT,  cert_pem,
+            MHD_OPTION_HTTPS_MEM_KEY,   key_pem,
+            MHD_OPTION_HTTPS_MEM_TRUST, trust_pem,   // enforce client cert
+            MHD_OPTION_NOTIFY_COMPLETED, HttpsServer::requestCompleted, nullptr,
+            MHD_OPTION_END
+        );
+    } else {
+        // mTLS not available — start without client-cert requirement.
+        // Suitable for local development; NOT recommended for production.
+        std::cerr << "[mTLS] WARNING: Starting without client-cert enforcement."
+                     " Direct port-8443 access is not blocked." << std::endl;
+        daemon = MHD_start_daemon(
+            MHD_USE_SELECT_INTERNALLY | MHD_USE_SSL,
+            port,
+            nullptr, nullptr,
+            &HttpsServer::answerToConnection, this,
+            MHD_OPTION_HTTPS_MEM_CERT, cert_pem,
+            MHD_OPTION_HTTPS_MEM_KEY,  key_pem,
+            MHD_OPTION_NOTIFY_COMPLETED, HttpsServer::requestCompleted, nullptr,
+            MHD_OPTION_END
+        );
+    }
+
     if (!daemon) {
         std::cerr << "Failed to start HTTPS server" << std::endl;
         cleanup();

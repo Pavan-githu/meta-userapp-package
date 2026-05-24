@@ -1,7 +1,8 @@
 #!/bin/sh
 # cloudflared-setup.sh — Convert a Cloudflare tunnel token into a local
-# credentials.json + config.yml with noTLSVerify=true so that cloudflared can
-# proxy to the local HTTPS server (self-signed cert) without TLS errors.
+# credentials.json + config.yml.  Also ensures the device HTTPS server
+# certificate has a unique CN (derived from the RPi3 CPU serial number) and
+# a SAN matching the public domain, so mTLS can identify this specific device.
 #
 # Run as ExecStartPre in cloudflared.service — idempotent (skips if already done).
 
@@ -30,6 +31,89 @@ if [ -z "$DOMAIN" ]; then
     exit 1
 fi
 echo "[cloudflared-setup] Domain: $DOMAIN"
+
+# ── Derive a unique device ID from the RPi3 CPU serial number ────────────────
+# /proc/cpuinfo exposes the hardware serial on Raspberry Pi.  Strip leading
+# zeros and prefix with 'rpi3-' to form a valid CN component.
+DEVICE_SERIAL=$(grep -m1 '^Serial' /proc/cpuinfo 2>/dev/null | awk '{print $3}' | sed 's/^0*//')
+if [ -z "$DEVICE_SERIAL" ]; then
+    # Fallback: use the wlan0 MAC address (remove colons)
+    DEVICE_SERIAL=$(cat /sys/class/net/wlan0/address 2>/dev/null | tr -d ':')
+fi
+if [ -z "$DEVICE_SERIAL" ]; then
+    # Last resort: use eth0 MAC address
+    DEVICE_SERIAL=$(cat /sys/class/net/eth0/address 2>/dev/null | tr -d ':')
+fi
+if [ -z "$DEVICE_SERIAL" ]; then
+    echo "[cloudflared-setup] ERROR: Cannot determine a unique device serial" >&2
+    exit 1
+fi
+DEVICE_ID="rpi3-${DEVICE_SERIAL}"
+echo "[cloudflared-setup] Device ID: $DEVICE_ID"
+
+# Persist the device ID so other components (e.g. BlockchainLogger) can read it.
+echo "$DEVICE_ID" > /etc/iot-gateway/device-id
+chmod 644 /etc/iot-gateway/device-id
+
+# ── Regenerate server certificate with unique CN + SAN if not present ─────────
+# CN  = DEVICE_ID   → uniquely identifies this physical device in the cert
+# SAN = DOMAIN      → allows cloudflared originServerName verification to pass
+# Both are required: CN alone no longer satisfies modern TLS CN matching rules.
+SERVER_CERT=/etc/https-server/server.crt
+SERVER_KEY=/etc/https-server/server.key
+ROOT_CA_KEY=/etc/https-server/root-ca.key
+ROOT_CA_CERT=/etc/https-server/root-ca.crt
+SERVER_CSR=/etc/https-server/server.csr
+
+if [ ! -f "$SERVER_CERT" ] || [ ! -f "$SERVER_KEY" ]; then
+    echo "[cloudflared-setup] Generating device-unique server certificate..."
+
+    # Write a temporary OpenSSL config with SAN extension
+    OPENSSL_CNF=$(mktemp /tmp/openssl-XXXXXX.cnf)
+    cat > "$OPENSSL_CNF" <<SSLCONF
+[req]
+distinguished_name = dn
+req_extensions     = v3_req
+prompt             = no
+
+[dn]
+C  = IN
+ST = KA
+L  = Bengaluru
+O  = REVA
+CN = $DEVICE_ID
+
+[v3_req]
+subjectAltName = @alt_names
+
+[alt_names]
+DNS.1 = $DOMAIN
+DNS.2 = localhost
+SALTCONF
+
+    # Generate private key
+    openssl genrsa -out "$SERVER_KEY" 2048 2>/dev/null
+
+    # Generate CSR using the config (embeds SAN)
+    openssl req -new -key "$SERVER_KEY" -out "$SERVER_CSR" \
+        -config "$OPENSSL_CNF" 2>/dev/null
+
+    # Sign with Root CA, copying SAN extensions into the final cert
+    openssl x509 -req -in "$SERVER_CSR" \
+        -CA "$ROOT_CA_CERT" -CAkey "$ROOT_CA_KEY" -CAcreateserial \
+        -out "$SERVER_CERT" -days 3650 -sha256 \
+        -extensions v3_req -extfile "$OPENSSL_CNF" 2>/dev/null
+
+    rm -f "$OPENSSL_CNF" "$SERVER_CSR"
+
+    if [ ! -f "$SERVER_CERT" ]; then
+        echo "[cloudflared-setup] ERROR: Server certificate generation failed" >&2
+        exit 1
+    fi
+    echo "[cloudflared-setup] Server cert: CN=$DEVICE_ID, SAN=DNS:$DOMAIN"
+else
+    echo "[cloudflared-setup] Server certificate already exists — skipping regeneration"
+fi
 
 # ── Decode the base64 tunnel token to JSON ──────────────────────────────────
 # Strip any whitespace / carriage-returns that may appear in the env file.
@@ -81,8 +165,15 @@ EOF
 chmod 600 "$CREDS"
 
 # ── Write config.yml ─────────────────────────────────────────────────────────
-# noTLSVerify=true lets cloudflared connect to the local HTTPS server even
-# though it uses a self-signed certificate.
+# caPool: cloudflared verifies the device's server certificate against the
+#   local Root CA (/etc/https-server/root-ca.crt), replacing the insecure
+#   noTLSVerify=true.  This provides device identification: only an RPi3 that
+#   holds a server certificate signed by our Root CA will be trusted.
+# originServerName: must match the CN/SAN on the device's server.crt.
+#   Set to the public domain so the TLS SNI check passes.
+# caPool for mTLS client cert (device identity outbound): when the
+#   backend architecture is added, uncomment originClientCertificate and
+#   originClientKey so the device presents client.crt to prove its identity.
 cat > "$CONFIG" <<EOF
 tunnel: $UUID
 credentials-file: $CREDS
@@ -91,10 +182,14 @@ ingress:
   - hostname: $DOMAIN
     service: https://localhost:8443
     originRequest:
-      noTLSVerify: true
+      caPool: /etc/https-server/root-ca.crt
+      originServerName: $DOMAIN
+      # Uncomment below to enable full mTLS (device presents client cert):
+      # originClientCertificate: /etc/cloudflared/client.crt
+      # originClientKey: /etc/cloudflared/client.key
   - service: http_status:404
 EOF
 chmod 600 "$CONFIG"
 
-echo "[cloudflared-setup] Configured: $DOMAIN -> https://localhost:8443 (noTLSVerify=true)"
+echo "[cloudflared-setup] Configured: $DOMAIN -> https://localhost:8443 (TLS verified via Root CA)"
 echo "[cloudflared-setup] Tunnel UUID: $UUID"
