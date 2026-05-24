@@ -20,6 +20,16 @@ private:
     bool executeCommand(const std::string& command);
     bool fileExists(const std::string& path);
     bool createDirectory(const std::string& path);
+
+    // Device identity helpers (used for server cert CN + SAN)
+    // Reads RPi3 CPU serial from /proc/cpuinfo; falls back to wlan0/eth0 MAC.
+    std::string deriveDeviceId() const;
+    // Returns first non-comment, non-empty line from a file.
+    std::string readFirstLine(const std::string& path) const;
+    // Generates server key (if missing), CSR with SAN, and signs with Root CA.
+    // CN = device_id, SAN = DNS:domain + DNS:localhost
+    bool generateServerCertWithSAN(const std::string& device_id,
+                                   const std::string& domain);
     
 public:
     // Constructor

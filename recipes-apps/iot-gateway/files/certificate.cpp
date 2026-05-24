@@ -2,6 +2,7 @@
 #include <iostream>
 #include <fstream>
 #include <cstdlib>
+#include <algorithm>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -214,6 +215,148 @@ bool CertificateManager::signClientCertificate(int validity_days) {
     return true;
 }
 
+// ============================================================================
+// Device Identity Helpers
+// ============================================================================
+
+std::string CertificateManager::deriveDeviceId() const {
+    // Try RPi3 CPU serial from /proc/cpuinfo
+    std::ifstream cpuinfo("/proc/cpuinfo");
+    // print few lines of cpuinfo for debugging
+    std::cout << "Reading /proc/cpuinfo for device ID..." << std::endl;
+    std::string line;
+    int line_count = 0;
+    while (std::getline(cpuinfo, line) && line_count < 5) {
+        std::cout << line << std::endl;
+        line_count++;
+    }
+    cpuinfo.clear();
+    cpuinfo.seekg(0, std::ios::beg);
+    while (std::getline(cpuinfo, line)) {
+        if (line.find("Serial") == 0) {
+            size_t colon = line.find(':');
+            if (colon != std::string::npos) {
+                std::string serial = line.substr(colon + 1);
+                // Strip leading whitespace and zeros
+                size_t start = serial.find_first_not_of(" \t0");
+                if (start != std::string::npos){
+                    // print found serial for debugging
+                    std::cout << "Found CPU Serial: " << serial.substr(start) << std::endl;
+                    return "rpi3-" + serial.substr(start);
+                }
+            }
+        }
+    }
+    // Fallback: wlan0 MAC (colons removed)
+    std::ifstream wlan("/sys/class/net/wlan0/address");
+    if (wlan) {
+        std::string mac;
+        std::getline(wlan, mac);
+        if (!mac.empty()) {
+            mac.erase(std::remove(mac.begin(), mac.end(), ':'), mac.end());
+            mac.erase(std::remove(mac.begin(), mac.end(), '\n'), mac.end());
+            // print found MAC for debugging
+            std::cout << "Found wlan0 MAC: " << mac << std::endl;
+            return "rpi3-" + mac;
+        }
+    }
+    // Fallback: eth0 MAC
+    std::ifstream eth("/sys/class/net/eth0/address");
+    if (eth) {
+        std::string mac;
+        std::getline(eth, mac);
+        if (!mac.empty()) {
+            mac.erase(std::remove(mac.begin(), mac.end(), ':'), mac.end());
+            mac.erase(std::remove(mac.begin(), mac.end(), '\n'), mac.end());
+            // print found MAC for debugging
+            std::cout << "Found eth0 MAC: " << mac << std::endl;
+            return "rpi3-" + mac;
+        }
+    }
+    std::cout << "Device ID could not be determined, using fallback." << std::endl;
+    return "rpi3-unknown";
+}
+
+std::string CertificateManager::readFirstLine(const std::string& path) const {
+    std::ifstream f(path);
+    std::string line;
+    while (std::getline(f, line)) {
+        if (line.empty() || line[0] == '#') continue;
+        // Strip trailing whitespace / CR
+        size_t end = line.find_last_not_of(" \t\r\n");
+        if (end != std::string::npos)
+            return line.substr(0, end + 1);
+    }
+    return "";
+}
+
+bool CertificateManager::generateServerCertWithSAN(const std::string& device_id,
+                                                   const std::string& domain) {
+    std::cout << "\n=== Generating Server Certificate ==="      << std::endl;
+    std::cout << "  CN: " << device_id << ", SAN: DNS:" << domain << ", DNS:localhost" << std::endl;
+
+    // Reuse the key if CertificateManager already created it; generate if missing.
+    if (!fileExists(server_key_path)) {
+        std::string cmd = "openssl genrsa -out " + server_key_path + " 2048 2>/dev/null";
+        if (!executeCommand(cmd)) {
+            std::cerr << "Failed to generate server key" << std::endl;
+            return false;
+        }
+    }
+
+    // Write a temporary OpenSSL config with SAN extension
+    std::string cnf_path = "/tmp/iot-gw-server.cnf";
+    {
+        std::ofstream cnf(cnf_path);
+        if (!cnf) {
+            std::cerr << "Failed to write temporary OpenSSL config: " << cnf_path << std::endl;
+            return false;
+        }
+        cnf << "[req]\n"
+            << "distinguished_name = dn\n"
+            << "req_extensions     = v3_req\n"
+            << "prompt             = no\n\n"
+            << "[dn]\n"
+            << "C  = IN\n"
+            << "ST = KA\n"
+            << "L  = Bengaluru\n"
+            << "O  = REVA\n"
+            << "CN = " << device_id << "\n\n"
+            << "[v3_req]\n"
+            << "subjectAltName = @alt_names\n\n"
+            << "[alt_names]\n"
+            << "DNS.1 = " << domain << "\n"
+            << "DNS.2 = localhost\n";
+    }
+
+    // Generate CSR (embeds SAN via req_extensions)
+    std::string cmd = "openssl req -new -key " + server_key_path +
+                      " -out " + server_csr_path +
+                      " -config " + cnf_path + " 2>/dev/null";
+    if (!executeCommand(cmd)) {
+        std::remove(cnf_path.c_str());
+        return false;
+    }
+
+    // Sign with Root CA, copying SAN extensions into the issued cert
+    cmd = "openssl x509 -req -in " + server_csr_path +
+          " -CA " + root_cert_path + " -CAkey " + root_key_path +
+          " -CAcreateserial -out " + server_cert_path +
+          " -days 3650 -sha256"
+          " -extensions v3_req -extfile " + cnf_path + " 2>/dev/null";
+    bool ok = executeCommand(cmd);
+
+    std::remove(cnf_path.c_str());
+    std::remove(server_csr_path.c_str());
+
+    if (!ok || !fileExists(server_cert_path)) {
+        std::cerr << "Failed to sign server certificate" << std::endl;
+        return false;
+    }
+    std::cout << "Server certificate generated: " << server_cert_path << std::endl;
+    return true;
+}
+
 bool CertificateManager::generateAllCertificates() {
     std::cout << "\n========================================" << std::endl;
     std::cout << "Certificate Generation Process Started" << std::endl;
@@ -230,23 +373,24 @@ bool CertificateManager::generateAllCertificates() {
         std::cerr << "Failed to generate Root CA" << std::endl;
         return false;
     }
-    
-    // Generate Server certificates
-    if (!generateServerKey()) {
-        std::cerr << "Failed to generate server key" << std::endl;
+
+    // Generate Server certificate with device-unique CN + SAN
+    // CN  = device serial from /proc/cpuinfo → uniquely identifies this RPi3
+    // SAN = public domain from /etc/cloudflared/domain → satisfies TLS SNI
+    std::string device_id = deriveDeviceId();
+    std::string domain    = readFirstLine("/etc/cloudflared/domain");
+    if (domain.empty()) {
+        // Domain not yet configured — fall back to localhost-only SAN so the
+        // HTTPS server can still start; cloudflared-setup.sh will regenerate
+        // the cert with the real domain once the tunnel token is installed.
+        domain = "localhost";
+        std::cout << "[Certificate] /etc/cloudflared/domain not found — using 'localhost' SAN" << std::endl;
+    }
+    if (!generateServerCertWithSAN(device_id, domain)) {
+        std::cerr << "Failed to generate server certificate" << std::endl;
         return false;
     }
-    
-    if (!generateServerCSR()) {
-        std::cerr << "Failed to generate server CSR" << std::endl;
-        return false;
-    }
-    
-    if (!signServerCertificate()) {
-        std::cerr << "Failed to sign server certificate" << std::endl;
-        return false;
-    }
-    
+
     // Generate Client certificates
     if (!generateClientKey()) {
         std::cerr << "Failed to generate client key" << std::endl;
@@ -272,7 +416,6 @@ bool CertificateManager::generateAllCertificates() {
     std::cout << "    - " << root_cert_path << std::endl;
     std::cout << "  Server:" << std::endl;
     std::cout << "    - " << server_key_path << std::endl;
-    std::cout << "    - " << server_csr_path << std::endl;
     std::cout << "    - " << server_cert_path << std::endl;
     std::cout << "  Client:" << std::endl;
     std::cout << "    - " << client_key_path << std::endl;
