@@ -14,7 +14,7 @@ DEPENDS = "libmicrohttpd gnutls libgpiod openssl curl"
 RDEPENDS:${PN} = "libmicrohttpd gnutls openssl iw wpa-supplicant libgpiod curl"
 
 SRCREV = "${AUTOREV}"
-SRC_URI = "git://github.com/Pavan-githu/meta-userapp-package.git;branch=feature/MFAblockchain;protocol=https \
+SRC_URI = "git://github.com/Pavan-githu/meta-userapp-package.git;branch=feature/deviceidentification;protocol=https \
            file://VERSION"
 
 S = "${WORKDIR}/git"
