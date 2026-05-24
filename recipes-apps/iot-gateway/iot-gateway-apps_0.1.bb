@@ -3,12 +3,12 @@ DESCRIPTION = "Unified application combining LED control and HTTPS firmware down
 LICENSE = "MIT"
 LIC_FILES_CHKSUM = "file://${COMMON_LICENSE_DIR}/MIT;md5=0835ade698e0bcf8506ecda2f7b4f302"
 
-# Version is read from recipes-apps/iot-gateway/VERSION — the single source
-# of truth for the iot-gateway application version.
-# The VERSION file contains the version on line 1 followed by a human-readable
-# release description. Only the first line is used as PV.
-# To release a new version: edit that file, bump line 1, update the description.
-PV = "${@open('${LAYERDIR}/recipes-apps/iot-gateway/VERSION').readline().strip()}"
+# PV is derived from the recipe filename (iot-gateway-apps_0.1.bb → PV = "0.1").
+# A Python inline expression for PV cannot be used with AUTOREV: when BitBake
+# resolves AUTOREV it runs `git ls-remote` with a PATH that embeds ${PV}, and
+# an unexpanded inline expression in that PATH causes /bin/sh "Bad substitution".
+# The VERSION file is still fetched via SRC_URI file:// and baked onto the
+# device by do_install for runtime version reporting.
 
 DEPENDS = "libmicrohttpd gnutls libgpiod openssl curl"
 RDEPENDS:${PN} = "libmicrohttpd gnutls openssl iw wpa-supplicant libgpiod curl"
