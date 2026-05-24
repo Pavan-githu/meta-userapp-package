@@ -3,12 +3,33 @@ DESCRIPTION = "Unified application combining LED control and HTTPS firmware down
 LICENSE = "MIT"
 LIC_FILES_CHKSUM = "file://${COMMON_LICENSE_DIR}/MIT;md5=0835ade698e0bcf8506ecda2f7b4f302"
 
-# PV is derived from the recipe filename (iot-gateway-apps_0.1.bb → PV = "0.1").
-# A Python inline expression for PV cannot be used with AUTOREV: when BitBake
-# resolves AUTOREV it runs `git ls-remote` with a PATH that embeds ${PV}, and
-# an unexpanded inline expression in that PATH causes /bin/sh "Bad substitution".
-# The VERSION file is still fetched via SRC_URI file:// and baked onto the
-# device by do_install for runtime version reporting.
+# ---------------------------------------------------------------------------
+# PV from VERSION file — safe approach with AUTOREV
+#
+# A Python inline expression in PV (${@open(...)...}) fails when AUTOREV
+# is used: BitBake embeds ${PV} in the shell PATH for `git ls-remote` before
+# the expression is evaluated, so /bin/sh sees a literal ${@...} and raises
+# "Bad substitution".
+#
+# Solution: an anonymous python function reads the VERSION file and calls
+# d.setVar('PV', ...) which stores PV as a resolved plain string.  When
+# AUTOREV later builds the shell PATH it sees e.g. "0.1.0", not an expression.
+# ---------------------------------------------------------------------------
+python () {
+    import os
+    # d.getVar('FILE') gives the absolute path to this recipe file;
+    # VERSION lives in the same directory.
+    recipe_dir = os.path.dirname(d.getVar('FILE') or '')
+    version_file = os.path.join(recipe_dir, 'VERSION')
+    try:
+        with open(version_file) as vf:
+            pv = vf.readline().strip()
+        if pv:
+            d.setVar('PV', pv)
+            bb.debug(1, "iot-gateway-apps: PV set to '%s' from VERSION file" % pv)
+    except Exception as e:
+        bb.warn("iot-gateway-apps: Could not read VERSION file (%s) — using default PV" % e)
+}
 
 DEPENDS = "libmicrohttpd gnutls libgpiod openssl curl"
 RDEPENDS:${PN} = "libmicrohttpd gnutls openssl iw wpa-supplicant libgpiod curl"
