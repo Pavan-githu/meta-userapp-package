@@ -1,7 +1,7 @@
 [Unit]
 Description=Cloudflare Tunnel
 Documentation=https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/
-After=network.target network-online.target
+After=network.target network-online.target iot-gateway.service
 Wants=network-online.target
 Requires=network-online.target
 
