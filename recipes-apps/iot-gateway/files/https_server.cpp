@@ -928,16 +928,18 @@ MHD_Result HttpsServer::handleLoginPost(struct MHD_Connection* connection,
         return MHD_YES;
     }
 
-    // ── Live blockchain connectivity check (blocking: login requires chain) ──
-    {
+    // Blockchain is used for audit logging only — its availability does NOT
+    // gate authentication. Login proceeds whether or not the chain is reachable.
+    // logEvent() calls below are fire-and-forget; if the chain is unreachable
+    // they are queued locally and replayed automatically when it returns.
+    std::string bc_status_msg;
+    if (s_blockchain) {
         std::string bc_err;
-        bool bc_ok = s_blockchain && s_blockchain->checkConnectivity(bc_err);
+        bool bc_ok = s_blockchain->checkConnectivity(bc_err);
         if (!bc_ok) {
-            if (bc_err.empty()) bc_err = "Blockchain logger not initialised.";
-            std::cerr << "[Login] Blockchain unreachable: " << bc_err << "\n";
-            return sendResponse(connection,
-                buildBlockchainErrorPage(bc_err, "/login"),
-                MHD_HTTP_SERVICE_UNAVAILABLE);
+            bc_status_msg = "[Login] Blockchain unreachable (" + bc_err +
+                            ") — event queued, auth continues normally.\n";
+            std::cerr << bc_status_msg;
         }
     }
 
@@ -1134,16 +1136,15 @@ MHD_Result HttpsServer::handleOtpPost(struct MHD_Connection* connection,
         return MHD_YES;
     }
 
-    // ── Live blockchain connectivity check (blocking: reveal() requires chain)
-    {
+    // Blockchain is used for audit logging only — its availability does NOT
+    // gate OTP verification. TOTP is validated locally regardless of chain state.
+    // Events are queued and replayed automatically when the chain returns.
+    if (s_blockchain) {
         std::string bc_err;
-        bool bc_ok = s_blockchain && s_blockchain->checkConnectivity(bc_err);
+        bool bc_ok = s_blockchain->checkConnectivity(bc_err);
         if (!bc_ok) {
-            if (bc_err.empty()) bc_err = "Blockchain logger not initialised.";
-            std::cerr << "[OTP] Blockchain unreachable: " << bc_err << "\n";
-            return sendResponse(connection,
-                buildBlockchainErrorPage(bc_err, "/login"),
-                MHD_HTTP_SERVICE_UNAVAILABLE);
+            std::cerr << "[OTP] Blockchain unreachable (" << bc_err
+                      << ") — event queued, OTP verification continues normally.\n";
         }
     }
 
@@ -1182,7 +1183,10 @@ MHD_Result HttpsServer::handleOtpPost(struct MHD_Connection* connection,
             "</body></html>", MHD_HTTP_UNAUTHORIZED);
     }
 
-    // ── Local fail-count fast-path lockout ───────────────────────────────────
+    // ── Local fail-count lockout (authoritative — no blockchain query needed) ─
+    // Lockout decision is made entirely from in-memory state. When a lockout
+    // threshold is crossed, a LOCKOUT event is logged to blockchain as an
+    // immutable audit record — but auth logic never reads from the chain.
     if (pending.local_fails >= MAX_LOCAL_OTP_FAILS) {
         pthread_mutex_lock(&s_session_mutex);
         s_sessions.erase(session_id);
@@ -1190,18 +1194,6 @@ MHD_Result HttpsServer::handleOtpPost(struct MHD_Connection* connection,
         return sendResponse(connection,
             "<html><body><h1>Account Locked</h1>"
             "<p>Too many failed OTP attempts. Contact an administrator.</p>"
-            "</body></html>", MHD_HTTP_FORBIDDEN);
-    }
-
-    // ── Query blockchain lockout (authoritative) ─────────────────────────────
-    if (s_blockchain && s_blockchain->isUserLocked(pending.username)) {
-        pthread_mutex_lock(&s_session_mutex);
-        s_sessions.erase(session_id);
-        pthread_mutex_unlock(&s_session_mutex);
-        std::cerr << "[OTP] User '" << pending.username << "' is locked on-chain\n";
-        return sendResponse(connection,
-            "<html><body><h1>Account Locked</h1>"
-            "<p>Your account is locked on the blockchain. Contact an administrator to unlock.</p>"
             "</body></html>", MHD_HTTP_FORBIDDEN);
     }
 

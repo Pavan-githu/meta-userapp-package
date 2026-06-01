@@ -56,6 +56,8 @@
 
 #include <string>
 #include <cstdint>
+#include <ctime>
+#include <deque>
 #include <pthread.h>
 
 class BlockchainLogger {
@@ -95,18 +97,34 @@ public:
     // -----------------------------------------------------------------------
 
     /**
-     * Log an auth event on-chain.
+     * Log an auth event.
+     *
+     * If the blockchain node is reachable the event is sent immediately and
+     * the transaction hash is returned.  If the node is unreachable the event
+     * is queued in memory (with the current wall-clock timestamp) and will be
+     * replayed automatically by the background flush thread as soon as
+     * connectivity is restored.  Auth is NEVER blocked by this call.
      *
      * @param username     Plaintext username (hashed before sending to chain)
      * @param event_type   See EventType enum
      * @param session_hex  64-hex-char session ID (32 bytes, no "0x" prefix)
-     *                     Used to correlate all events in one login attempt.
-     * @return             Transaction hash ("0x...") on success; "" on failure.
-     *                     Failure is non-fatal: local auth still proceeds.
+     * @return             Transaction hash on immediate success; "" if queued
+     *                     or on permanent failure.
      */
     std::string logEvent(const std::string& username,
                          EventType event_type,
                          const std::string& session_hex);
+
+    /**
+     * Attempt to send all queued (offline) events to the blockchain in
+     * the order they were originally generated.  Called automatically by
+     * the background flush thread; exposed publicly for testing.
+     * Returns the number of events successfully flushed.
+     */
+    int flushPendingEvents();
+
+    /** Number of events currently waiting in the offline queue. */
+    size_t pendingCount() const;
 
     /**
      * Query the contract: is this user locked out on-chain?
@@ -153,6 +171,26 @@ public:
     static std::string generateSessionId();
 
 private:
+    // -----------------------------------------------------------------------
+    // Offline event queue — holds events that could not be sent immediately
+    // because the blockchain node was unreachable at the time of the call.
+    // Events are replayed in FIFO order by flushPendingEvents().
+    // -----------------------------------------------------------------------
+    struct PendingEvent {
+        std::string  username;      // plaintext (hashed just before sending)
+        EventType    event_type;
+        std::string  session_hex;   // 64-hex session ID
+        std::time_t  queued_at;     // wall-clock time the event was generated
+    };
+
+    std::deque<PendingEvent>   pending_queue_;   // FIFO offline event buffer
+    static const size_t        MAX_QUEUE = 500;  // cap to avoid unbounded growth
+
+    // Background thread that periodically checks connectivity and flushes queue
+    pthread_t        flush_thread_;
+    bool             flush_thread_running_;
+    static void*     flushThreadFunc(void* arg);
+
     std::string      rpc_url_;
     std::string      contract_addr_;
     std::string      device_addr_;

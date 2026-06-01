@@ -25,7 +25,7 @@ struct PendingOTP {
     std::string totp_secret;    // base32 TOTP secret for this user
     std::string session_id;     // 64-hex-char (32-byte) random session token
     std::time_t expires_at;     // Unix timestamp – expires after OTP_SESSION_TTL s
-    int         local_fails;    // local fail counter (blockchain is authoritative)
+    int         local_fails;    // consecutive wrong OTP counter (lockout is local)
 };
 
 // How long (seconds) the OTP phase stays open before it expires

@@ -24,6 +24,7 @@
 #include <iostream>
 #include <cstring>
 #include <cstdio>
+#include <unistd.h>   // sleep()
 
 // ---------------------------------------------------------------------------
 // libcurl write-callback: accumulates response body into a std::string
@@ -45,7 +46,8 @@ BlockchainLogger::BlockchainLogger(const std::string& rpc_url,
       contract_addr_(contract_addr),
       device_addr_(device_addr),
       chain_id_(chain_id),
-      available_(false)
+      available_(false),
+      flush_thread_running_(false)
 {
     pthread_mutex_init(&mutex_, nullptr);
 
@@ -68,8 +70,12 @@ BlockchainLogger::BlockchainLogger(const std::string& rpc_url,
         std::cout << "[Blockchain] Connected to RPC: " << rpc_url_ << "\n";
     } else {
         std::cerr << "[Blockchain] WARNING: Cannot reach " << rpc_url_
-                  << " — blockchain logging disabled (auth still works locally)\n";
+                  << " — events will be queued and replayed when chain returns\n";
     }
+
+    // Start background flush thread — wakes every 30 s to drain the queue
+    flush_thread_running_ = true;
+    pthread_create(&flush_thread_, nullptr, &BlockchainLogger::flushThreadFunc, this);
 }
 
 // ---------------------------------------------------------------------------
@@ -77,6 +83,9 @@ BlockchainLogger::BlockchainLogger(const std::string& rpc_url,
 // ---------------------------------------------------------------------------
 BlockchainLogger::~BlockchainLogger()
 {
+    // Signal flush thread to stop and wait for it
+    flush_thread_running_ = false;
+    pthread_join(flush_thread_, nullptr);
     pthread_mutex_destroy(&mutex_);
 }
 
@@ -256,15 +265,137 @@ std::string BlockchainLogger::generateSessionId()
 }
 
 // ---------------------------------------------------------------------------
+// flushThreadFunc — background thread: checks connectivity every 30 s and
+//   drains the pending queue when the chain is reachable.
+// ---------------------------------------------------------------------------
+void* BlockchainLogger::flushThreadFunc(void* arg)
+{
+    BlockchainLogger* self = static_cast<BlockchainLogger*>(arg);
+    while (self->flush_thread_running_) {
+        sleep(30);
+        if (!self->flush_thread_running_) break;
+
+        std::string err;
+        bool reachable = self->checkConnectivity(err);
+
+        pthread_mutex_lock(&self->mutex_);
+        self->available_ = reachable;
+        size_t qsize = self->pending_queue_.size();
+        pthread_mutex_unlock(&self->mutex_);
+
+        if (reachable && qsize > 0) {
+            std::cout << "[Blockchain] Chain reachable — flushing "
+                      << qsize << " queued event(s)\n";
+            self->flushPendingEvents();
+        } else if (!reachable && qsize > 0) {
+            std::cerr << "[Blockchain] Still unreachable — "
+                      << qsize << " event(s) remain queued\n";
+        }
+    }
+    return nullptr;
+}
+
+// ---------------------------------------------------------------------------
+// flushPendingEvents — send all queued events to chain in FIFO order,
+//   preserving their original wall-clock timestamps in the log output.
+// ---------------------------------------------------------------------------
+int BlockchainLogger::flushPendingEvents()
+{
+    int flushed = 0;
+    while (true) {
+        pthread_mutex_lock(&mutex_);
+        if (pending_queue_.empty()) {
+            pthread_mutex_unlock(&mutex_);
+            break;
+        }
+        PendingEvent ev = pending_queue_.front();
+        pthread_mutex_unlock(&mutex_);
+
+        char ts[32];
+        std::strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S",
+                      std::localtime(&ev.queued_at));
+
+        std::string user_hash = hashUsername(ev.username);
+        std::string calldata  = abiEncodeLogEvent(user_hash,
+                                                  static_cast<uint8_t>(ev.event_type),
+                                                  ev.session_hex);
+
+        std::ostringstream body;
+        body << R"({"jsonrpc":"2.0","method":"eth_sendTransaction","params":[{)"
+             << R"("from":")" << device_addr_ << R"(",)"
+             << R"("to":")"   << contract_addr_ << R"(",)"
+             << R"("gas":"0x30d40",)"
+             << R"("data":")" << calldata << R"("}],"id":2})";
+
+        std::string resp = jsonRPC(body.str());
+        if (resp.empty() || hasError(resp)) {
+            // Chain went away again — stop, keep event at front of queue
+            std::cerr << "[Blockchain] Flush interrupted (chain unreachable) — "
+                      << pending_queue_.size() << " event(s) remain queued\n";
+            pthread_mutex_lock(&mutex_);
+            available_ = false;
+            pthread_mutex_unlock(&mutex_);
+            break;
+        }
+
+        // Remove successfully sent event from queue
+        pthread_mutex_lock(&mutex_);
+        if (!pending_queue_.empty())
+            pending_queue_.pop_front();
+        pthread_mutex_unlock(&mutex_);
+
+        std::string txhash = extractResult(resp);
+        std::cout << "[Blockchain] Flushed queued event (originally at " << ts << ")"
+                  << " user=" << user_hash.substr(0, 10) << "..."
+                  << " event=" << static_cast<int>(ev.event_type)
+                  << " tx=" << txhash << "\n";
+        ++flushed;
+    }
+    return flushed;
+}
+
+// ---------------------------------------------------------------------------
+// pendingCount
+// ---------------------------------------------------------------------------
+size_t BlockchainLogger::pendingCount() const
+{
+    pthread_mutex_lock(&mutex_);
+    size_t n = pending_queue_.size();
+    pthread_mutex_unlock(&mutex_);
+    return n;
+}
+
+// ---------------------------------------------------------------------------
 // logEvent
 // ---------------------------------------------------------------------------
 std::string BlockchainLogger::logEvent(const std::string& username,
                                        EventType event_type,
                                        const std::string& session_hex)
 {
-    if (!available_) {
-        std::cerr << "[Blockchain] logEvent skipped – logger unavailable\n";
-        return "";
+    // Check current availability under lock
+    pthread_mutex_lock(&mutex_);
+    bool currently_available = available_;
+    pthread_mutex_unlock(&mutex_);
+
+    if (!currently_available) {
+        // Queue the event with the current wall-clock timestamp so the audit
+        // trail preserves WHEN it actually occurred, not when it was sent.
+        pthread_mutex_lock(&mutex_);
+        if (pending_queue_.size() < MAX_QUEUE) {
+            PendingEvent ev;
+            ev.username    = username;
+            ev.event_type  = event_type;
+            ev.session_hex = session_hex;
+            ev.queued_at   = std::time(nullptr);
+            pending_queue_.push_back(ev);
+            std::cerr << "[Blockchain] Node unreachable — event queued ("
+                      << pending_queue_.size() << " pending)\n";
+        } else {
+            std::cerr << "[Blockchain] Queue full (" << MAX_QUEUE
+                      << ") — oldest event dropped. Check chain connectivity.\n";
+        }
+        pthread_mutex_unlock(&mutex_);
+        return "";   // auth is NOT blocked
     }
 
     std::string user_hash = hashUsername(username);
@@ -272,7 +403,6 @@ std::string BlockchainLogger::logEvent(const std::string& username,
                                                static_cast<uint8_t>(event_type),
                                                session_hex);
 
-    // Build eth_sendTransaction JSON body
     // gas = 0x30d40 = 200 000
     std::ostringstream body;
     body << R"({"jsonrpc":"2.0","method":"eth_sendTransaction","params":[{)"
@@ -283,7 +413,19 @@ std::string BlockchainLogger::logEvent(const std::string& username,
 
     std::string resp = jsonRPC(body.str());
     if (resp.empty() || hasError(resp)) {
-        std::cerr << "[Blockchain] logEvent failed. Response: " << resp << "\n";
+        // Send failed mid-flight — queue for retry and mark unavailable
+        std::cerr << "[Blockchain] logEvent send failed — queueing for retry\n";
+        pthread_mutex_lock(&mutex_);
+        available_ = false;
+        if (pending_queue_.size() < MAX_QUEUE) {
+            PendingEvent ev;
+            ev.username    = username;
+            ev.event_type  = event_type;
+            ev.session_hex = session_hex;
+            ev.queued_at   = std::time(nullptr);
+            pending_queue_.push_back(ev);
+        }
+        pthread_mutex_unlock(&mutex_);
         return "";
     }
 
