@@ -974,16 +974,76 @@ MHD_Result HttpsServer::handleLoginPost(struct MHD_Connection* connection,
         pthread_mutex_lock(&s_session_mutex);
         auto pf = s_pass_fails.find(username);
         if (pf != s_pass_fails.end() && pf->second.locked) {
+            time_t elapsed = std::time(nullptr) - pf->second.lock_time;
+            if (elapsed >= LOCKOUT_DURATION_SECS) {
+                // Cooldown expired — auto-unlock
+                s_pass_fails.erase(pf);
+                pthread_mutex_unlock(&s_session_mutex);
+                addActivityLog("[LOGIN] Lockout expired for '" + username + "' — auto-unlocked");
+            } else {
+                long mins_remaining = (LOCKOUT_DURATION_SECS - elapsed + 59) / 60;
+                long secs_remaining = LOCKOUT_DURATION_SECS - static_cast<long>(elapsed);
+                pthread_mutex_unlock(&s_session_mutex);
+                addActivityLog("[LOGIN] Account locked (password) for '" + username + "'");
+                return sendResponse(connection,
+                    "<!DOCTYPE html><html lang=\"en\">"
+                    "<head><meta charset=\"UTF-8\"><title>Account Locked</title>"
+                    "<style>"
+                    "body{margin:0;font-family:Arial,sans-serif;background:#f0f2f5;"
+                    "display:flex;justify-content:center;align-items:center;min-height:100vh;}"
+                    ".overlay{position:fixed;inset:0;background:rgba(0,0,0,0.55);display:flex;"
+                    "justify-content:center;align-items:center;z-index:999;}"
+                    ".modal{background:#fff;border-radius:12px;padding:40px 36px;max-width:420px;"
+                    "width:90%;box-shadow:0 8px 32px rgba(0,0,0,0.25);text-align:center;}"
+                    ".icon{font-size:3.5em;margin-bottom:12px;}"
+                    "h2{margin:0 0 10px;color:#c0392b;font-size:1.4em;}"
+                    "p{color:#555;line-height:1.6;margin:8px 0;}"
+                    ".countdown{font-size:2em;font-weight:bold;color:#c0392b;"
+                    "margin:18px 0;letter-spacing:2px;}"
+                    ".label{font-size:0.85em;color:#888;margin-bottom:20px;}"
+                    ".btn{display:inline-block;margin-top:10px;padding:10px 28px;"
+                    "background:#3498db;color:#fff;text-decoration:none;"
+                    "border-radius:6px;font-size:1em;border:none;cursor:pointer;}"
+                    ".btn:hover{background:#2980b9;}"
+                    ".progress-bar{width:100%;background:#f0f0f0;border-radius:999px;"
+                    "height:8px;margin:16px 0;overflow:hidden;}"
+                    ".progress-fill{height:100%;background:#c0392b;border-radius:999px;"
+                    "transition:width 1s linear;}"
+                    "</style></head>"
+                    "<body>"
+                    "<div class=\"overlay\">"
+                    "<div class=\"modal\">"
+                    "<div class=\"icon\">&#128274;</div>"
+                    "<h2>Account Temporarily Locked</h2>"
+                    "<p>Too many failed password attempts.<br/>Your account is locked for <strong>30 minutes</strong>.</p>"
+                    "<div class=\"countdown\" id=\"timer\">--:--</div>"
+                    "<div class=\"label\">remaining before you can try again</div>"
+                    "<div class=\"progress-bar\"><div class=\"progress-fill\" id=\"bar\"></div></div>"
+                    "<p style=\"font-size:0.82em;color:#aaa;\">This page will automatically redirect when the lockout expires.</p>"
+                    "<a href=\"/login\" class=\"btn\">&#8592; Back to Login</a>"
+                    "</div></div>"
+                    "<script>"
+                    "var total=" + std::to_string(secs_remaining) + ";"
+                    "var maxSecs=" + std::to_string(LOCKOUT_DURATION_SECS) + ";"
+                    "function fmt(s){"
+                    "  var m=Math.floor(s/60),sec=s%60;"
+                    "  return (m<10?'0':'')+m+':'+(sec<10?'0':'')+sec;"
+                    "}"
+                    "function tick(){"
+                    "  if(total<=0){window.location.href='/login';return;}"
+                    "  document.getElementById('timer').textContent=fmt(total);"
+                    "  var pct=Math.round((total/maxSecs)*100);"
+                    "  document.getElementById('bar').style.width=pct+'%';"
+                    "  total--;setTimeout(tick,1000);"
+                    "}"
+                    "tick();"
+                    "</script>"
+                    "</body></html>",
+                    MHD_HTTP_FORBIDDEN);
+            }
+        } else {
             pthread_mutex_unlock(&s_session_mutex);
-            addActivityLog("[LOGIN] Account locked (password) for '" + username + "'");
-            return sendResponse(connection,
-                "<html><body><h1>Account Locked</h1>"
-                "<p>Too many failed password attempts. Contact an administrator.</p>"
-                "<p><a href='/login'>Back to Login</a></p>"
-                "</body></html>",
-                MHD_HTTP_FORBIDDEN);
         }
-        pthread_mutex_unlock(&s_session_mutex);
     }
 
     // ── Verify password ─────────────────────────────────────────────────────
@@ -1016,8 +1076,10 @@ MHD_Result HttpsServer::handleLoginPost(struct MHD_Connection* connection,
         pthread_mutex_lock(&s_session_mutex);
         auto& rec = s_pass_fails[username];
         rec.count++;
-        if (rec.count >= MAX_PASSWORD_FAILS)
-            rec.locked = true;
+        if (rec.count >= MAX_PASSWORD_FAILS) {
+            rec.locked    = true;
+            rec.lock_time = std::time(nullptr);
+        }
         int pw_remaining = MAX_PASSWORD_FAILS - rec.count;
         pthread_mutex_unlock(&s_session_mutex);
 

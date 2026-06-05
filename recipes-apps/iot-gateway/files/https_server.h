@@ -35,12 +35,16 @@ static const int MAX_LOCAL_OTP_FAILS = 3;
 // Max password failures before account is locally locked (first factor)
 static const int MAX_PASSWORD_FAILS = 3;
 
+// Lockout duration in seconds (30 minutes — PCI-DSS / OWASP aligned)
+static const int LOCKOUT_DURATION_SECS = 30 * 60;
+
 // ---------------------------------------------------------------------------
 // PasswordFailRecord – tracks consecutive password failures per username
 // ---------------------------------------------------------------------------
 struct PasswordFailRecord {
-    int  count;       // number of consecutive failed password attempts
-    bool locked;      // true after count reaches MAX_PASSWORD_FAILS
+    int     count;      // number of consecutive failed password attempts
+    bool    locked;     // true after count reaches MAX_PASSWORD_FAILS
+    time_t  lock_time;  // wall-clock time when locked (0 if not locked)
 };
 
 // Class to hold uploaded data with dynamic memory management
