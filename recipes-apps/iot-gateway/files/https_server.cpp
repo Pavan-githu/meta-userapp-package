@@ -1245,18 +1245,83 @@ MHD_Result HttpsServer::handleOtpPost(struct MHD_Connection* connection,
             "</body></html>", MHD_HTTP_UNAUTHORIZED);
     }
 
-    // ── Local fail-count lockout (authoritative — no blockchain query needed) ─
-    // Lockout decision is made entirely from in-memory state. When a lockout
-    // threshold is crossed, a LOCKOUT event is logged to blockchain as an
-    // immutable audit record — but auth logic never reads from the chain.
-    if (pending.local_fails >= MAX_LOCAL_OTP_FAILS) {
+    // ── Check OTP account lockout (persistent 30-min cooldown, same as password) ──
+    // When OTP fails 3x, account is locked for 30 minutes, not just the session.
+    // This mirrors password failure behavior for symmetrical security.
+    {
         pthread_mutex_lock(&s_session_mutex);
-        s_sessions.erase(session_id);
-        pthread_mutex_unlock(&s_session_mutex);
-        return sendResponse(connection,
-            "<html><body><h1>Account Locked</h1>"
-            "<p>Too many failed OTP attempts. Contact an administrator.</p>"
-            "</body></html>", MHD_HTTP_FORBIDDEN);
+        auto pf = s_pass_fails.find(pending.username);
+        if (pf != s_pass_fails.end() && pf->second.locked) {
+            time_t elapsed = std::time(nullptr) - pf->second.lock_time;
+            if (elapsed >= LOCKOUT_DURATION_SECS) {
+                // Cooldown expired — auto-unlock
+                s_pass_fails.erase(pf);
+                pthread_mutex_unlock(&s_session_mutex);
+                addActivityLog("[OTP] Lockout expired for '" + pending.username + "' — auto-unlocked");
+            } else {
+                long secs_remaining = LOCKOUT_DURATION_SECS - static_cast<long>(elapsed);
+                pthread_mutex_unlock(&s_session_mutex);
+                addActivityLog("[OTP] Account locked (from OTP failures) for '" + pending.username + "'");
+                // Return 403 with countdown modal (same as password lockout)
+                return sendResponse(connection,
+                    "<!DOCTYPE html><html lang=\"en\">"
+                    "<head><meta charset=\"UTF-8\"><title>Account Locked</title>"
+                    "<style>"
+                    "body{margin:0;font-family:Arial,sans-serif;background:#f0f2f5;"
+                    "display:flex;justify-content:center;align-items:center;min-height:100vh;}"
+                    ".overlay{position:fixed;inset:0;background:rgba(0,0,0,0.55);display:flex;"
+                    "justify-content:center;align-items:center;z-index:999;}"
+                    ".modal{background:#fff;border-radius:12px;padding:40px 36px;max-width:420px;"
+                    "width:90%;box-shadow:0 8px 32px rgba(0,0,0,0.25);text-align:center;}"
+                    ".icon{font-size:3.5em;margin-bottom:12px;}"
+                    "h2{margin:0 0 10px;color:#c0392b;font-size:1.4em;}"
+                    "p{color:#555;line-height:1.6;margin:8px 0;}"
+                    ".countdown{font-size:2em;font-weight:bold;color:#c0392b;"
+                    "margin:18px 0;letter-spacing:2px;}"
+                    ".label{font-size:0.85em;color:#888;margin-bottom:20px;}"
+                    ".btn{display:inline-block;margin-top:10px;padding:10px 28px;"
+                    "background:#3498db;color:#fff;text-decoration:none;"
+                    "border-radius:6px;font-size:1em;border:none;cursor:pointer;}"
+                    ".btn:hover{background:#2980b9;}"
+                    ".progress-bar{width:100%;background:#f0f0f0;border-radius:999px;"
+                    "height:8px;margin:16px 0;overflow:hidden;}"
+                    ".progress-fill{height:100%;background:#c0392b;border-radius:999px;"
+                    "transition:width 1s linear;}"
+                    "</style></head>"
+                    "<body>"
+                    "<div class=\"overlay\">"
+                    "<div class=\"modal\">"
+                    "<div class=\"icon\">&#128274;</div>"
+                    "<h2>Account Temporarily Locked</h2>"
+                    "<p>Too many failed OTP attempts.<br/>Your account is locked for <strong>30 minutes</strong>.</p>"
+                    "<div class=\"countdown\" id=\"timer\">--:--</div>"
+                    "<div class=\"label\">remaining before you can try again</div>"
+                    "<div class=\"progress-bar\"><div class=\"progress-fill\" id=\"bar\"></div></div>"
+                    "<p style=\"font-size:0.82em;color:#aaa;\">This page will automatically redirect when the lockout expires.</p>"
+                    "<a href=\"/login\" class=\"btn\">&#8592; Back to Login</a>"
+                    "</div></div>"
+                    "<script>"
+                    "var total=" + std::to_string(secs_remaining) + ";"
+                    "var maxSecs=" + std::to_string(LOCKOUT_DURATION_SECS) + ";"
+                    "function fmt(s){"
+                    "  var m=Math.floor(s/60),sec=s%60;"
+                    "  return (m<10?'0':'')+m+':'+(sec<10?'0':'')+sec;"
+                    "}"
+                    "function tick(){"
+                    "  if(total<=0){window.location.href='/login';return;}"
+                    "  document.getElementById('timer').textContent=fmt(total);"
+                    "  var pct=Math.round((total/maxSecs)*100);"
+                    "  document.getElementById('bar').style.width=pct+'%';"
+                    "  total--;setTimeout(tick,1000);"
+                    "}"
+                    "tick();"
+                    "</script>"
+                    "</body></html>",
+                    MHD_HTTP_FORBIDDEN);
+            }
+        } else {
+            pthread_mutex_unlock(&s_session_mutex);
+        }
     }
 
     // ── Parse OTP from form body ─────────────────────────────────────────────
@@ -1296,21 +1361,35 @@ MHD_Result HttpsServer::handleOtpPost(struct MHD_Connection* connection,
         }
         pthread_mutex_unlock(&s_session_mutex);
 
-        // Log OTP_FAIL to blockchain
+        // Log OTP_FAIL to blockchain (fire-and-forget, queues if offline)
         if (s_blockchain) {
             s_blockchain->logEvent(pending.username, BlockchainLogger::OTP_FAIL, session_id);
-            addActivityLog("[BLOCKCHAIN] OTP_FAIL logged for '" + pending.username + "'");
-            // If local fails now >= max, also log LOCKOUT event
-            if (pending.local_fails >= MAX_LOCAL_OTP_FAILS) {
-                s_blockchain->logEvent(pending.username, BlockchainLogger::LOCKOUT, session_id);
-                addActivityLog("[BLOCKCHAIN] LOCKOUT logged for '" + pending.username + "'");
-            }
+            addActivityLog("[BLOCKCHAIN] OTP_FAIL logged for '" + pending.username + "' (queued if offline)");
         }
         addActivityLog("[OTP] Wrong code for '" + pending.username + "' ("
             + std::to_string(pending.local_fails) + "/" + std::to_string(MAX_LOCAL_OTP_FAILS) + " fails)");
 
         std::cerr << "[OTP] Wrong OTP for '" << pending.username
                   << "' (local fail " << pending.local_fails << "/" << MAX_LOCAL_OTP_FAILS << ")\n";
+
+        // If 3 OTP failures reached, lock the entire account (30-min cooldown)
+        // This mirrors password failure behavior for symmetrical security
+        if (pending.local_fails >= MAX_LOCAL_OTP_FAILS) {
+            pthread_mutex_lock(&s_session_mutex);
+            PasswordFailRecord& account_lock = s_pass_fails[pending.username];
+            account_lock.count    = MAX_PASSWORD_FAILS;  // Set to max to trigger lock
+            account_lock.locked   = true;
+            account_lock.lock_time = std::time(nullptr); // Set lock timestamp
+            pthread_mutex_unlock(&s_session_mutex);
+
+            // Log LOCKOUT event to blockchain (fire-and-forget, queues if offline)
+            if (s_blockchain) {
+                s_blockchain->logEvent(pending.username, BlockchainLogger::LOCKOUT, session_id);
+                addActivityLog("[BLOCKCHAIN] LOCKOUT event logged (OTP threshold) — queued if offline");
+            }
+            addActivityLog("[OTP] Account now locked for 30 min (3 OTP failures for '" + pending.username + "')");
+            std::cerr << "[OTP] Account LOCKED (OTP failures) for user: " << pending.username << "\n";
+        }
 
         int remaining = MAX_LOCAL_OTP_FAILS - pending.local_fails;
         std::string page =
