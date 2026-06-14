@@ -293,7 +293,7 @@ std::string CertificateManager::readFirstLine(const std::string& path) const {
 bool CertificateManager::generateServerCertWithSAN(const std::string& device_id,
                                                    const std::string& domain) {
     std::cout << "\n=== Generating Server Certificate ==="      << std::endl;
-    std::cout << "  CN: " << device_id << ", SAN: DNS:" << domain << ", DNS:localhost" << std::endl;
+    std::cout << "  CN: " << device_id << ", SAN: DNS:" << domain << ", DNS:localhost, DNS:" << device_id << std::endl;
 
     // Reuse the key if CertificateManager already created it; generate if missing.
     if (!fileExists(server_key_path)) {
@@ -326,7 +326,8 @@ bool CertificateManager::generateServerCertWithSAN(const std::string& device_id,
             << "subjectAltName = @alt_names\n\n"
             << "[alt_names]\n"
             << "DNS.1 = " << domain << "\n"
-            << "DNS.2 = localhost\n";
+            << "DNS.2 = localhost\n"
+            << "DNS.3 = " << device_id << "\n";
     }
 
     // Generate CSR (embeds SAN via req_extensions)
