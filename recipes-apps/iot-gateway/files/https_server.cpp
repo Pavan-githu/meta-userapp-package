@@ -368,7 +368,7 @@ bool HttpsServer::start(const char* cert_file, const char* key_file,
     // the TLS handshake before a single HTTP byte is processed.
     if (mtls_enabled) {
         daemon = MHD_start_daemon(
-            MHD_USE_SELECT_INTERNALLY | MHD_USE_SSL,
+            MHD_USE_INTERNAL_POLLING_THREAD | MHD_USE_TLS,
             port,
             nullptr, nullptr,
             &HttpsServer::answerToConnection, this,
@@ -391,7 +391,7 @@ bool HttpsServer::start(const char* cert_file, const char* key_file,
         std::cerr << "[mTLS] WARNING: Starting without client-cert enforcement."
                      " Direct port-8443 access is not blocked." << std::endl;
         daemon = MHD_start_daemon(
-            MHD_USE_SELECT_INTERNALLY | MHD_USE_SSL,
+            MHD_USE_INTERNAL_POLLING_THREAD | MHD_USE_TLS,
             port,
             nullptr, nullptr,
             &HttpsServer::answerToConnection, this,
@@ -403,12 +403,19 @@ bool HttpsServer::start(const char* cert_file, const char* key_file,
     }
 
     if (!daemon) {
-        std::cerr << "Failed to start HTTPS server on port " << port << std::endl;
+        std::cerr << "\n[HTTPS ERROR] Failed to start HTTPS server on port " << port << std::endl;
         std::cerr << "  Binding address: " << bind_address << std::endl;
         std::cerr << "  mTLS enforcement: " << (mtls_enabled ? "ENABLED" : "DISABLED") << std::endl;
-        std::cerr << "  Check: Is port " << port << " already in use?" << std::endl;
-        std::cerr << "  Check: Are certificate/key files valid?" << std::endl;
-        std::cerr << "  Check: Is libmicrohttpd/GnuTLS properly installed?" << std::endl;
+        std::cerr << "  Certificate loaded: " << (cert_pem ? "YES" : "NO") << std::endl;
+        std::cerr << "  Key loaded: " << (key_pem ? "YES" : "NO") << std::endl;
+        std::cerr << "  CA loaded: " << (trust_pem ? "YES" : "NO") << std::endl;
+        std::cerr << "\n[DEBUG] Possible causes:" << std::endl;
+        std::cerr << "  1. Port " << port << " already in use (check: lsof -i :" << port << ")" << std::endl;
+        std::cerr << "  2. Certificate/key format invalid (verify with: openssl x509 -in /path/to/cert.crt -text)" << std::endl;
+        std::cerr << "  3. GnuTLS/libmicrohttpd incompatibility (check library versions)" << std::endl;
+        std::cerr << "  4. Insufficient permissions to bind to port " << port << std::endl;
+        std::cerr << "  5. libmicrohttpd not built with TLS support" << std::endl;
+        std::cerr << "  System errno: " << strerror(errno) << "\n" << std::endl;
         cleanup();
         return false;
     }

@@ -10,9 +10,14 @@ CONF_DIR=/etc/cloudflared
 CONFIG="$CONF_DIR/config.yml"
 CREDS="$CONF_DIR/credentials.json"
 
-# Already configured on a previous boot — nothing to do
+# Check if already configured AND has the mTLS client cert settings
 if [ -f "$CREDS" ] && [ -f "$CONFIG" ]; then
-    exit 0
+    # If config exists but doesn't have mTLS settings, force regeneration
+    if grep -q "originClientCertificate" "$CONFIG" 2>/dev/null; then
+        exit 0
+    fi
+    # Otherwise, config exists but is outdated — fall through to regenerate
+    echo "[cloudflared-setup] Updating config to enable mTLS..."
 fi
 
 # Source the environment to get CLOUDFLARE_TUNNEL_TOKEN
@@ -138,9 +143,9 @@ ingress:
     originRequest:
       caPool: /etc/https-server/root-ca.crt
       originServerName: $DOMAIN
-      # Uncomment below to enable full mTLS (device presents client cert):
-      # originClientCertificate: /etc/cloudflared/client.crt
-      # originClientKey: /etc/cloudflared/client.key
+      # Enable full mTLS (device presents client cert to backend):
+      originClientCertificate: /etc/https-server/client.crt
+      originClientKey: /etc/https-server/client.key
   - service: http_status:404
 EOF
 chmod 600 "$CONFIG"
