@@ -396,9 +396,12 @@ bool HttpsServer::start(const char* cert_file, const char* key_file,
     }
 
     if (!daemon) {
-        std::cerr << "Failed to start HTTPS server" << std::endl;
-        std::cout << "[mTLS] Root CA loaded from " << trust_ca_file
-                  << " — client certificate enforcement ENABLED" << std::endl;
+        std::cerr << "Failed to start HTTPS server on port " << port << std::endl;
+        std::cerr << "  Binding address: " << bind_address << std::endl;
+        std::cerr << "  mTLS enforcement: " << (mtls_enabled ? "ENABLED" : "DISABLED") << std::endl;
+        std::cerr << "  Check: Is port " << port << " already in use?" << std::endl;
+        std::cerr << "  Check: Are certificate/key files valid?" << std::endl;
+        std::cerr << "  Check: Is libmicrohttpd/GnuTLS properly installed?" << std::endl;
         cleanup();
         return false;
     }
@@ -1074,36 +1077,6 @@ MHD_Result HttpsServer::handleLoginPost(struct MHD_Connection* connection,
         : "[LOGIN] FAILED password for '" + username + "'");
 
     if (!auth_ok) {
-        // ── Password lockout design rationale ────────────────────────────────
-        // Password-phase failures are enforced exclusively in local process
-        // memory (s_pass_fails) rather than being written to the blockchain on
-        // every attempt.  This is a deliberate operational choice for three
-        // reasons:
-        //
-        //   1. Attack frequency: Automated credential-stuffing and brute-force
-        //      campaigns can submit hundreds of password attempts per minute.
-        //      Issuing an on-chain transaction for each failure would produce a
-        //      proportionally high volume of Ethereum transactions, increasing
-        //      gas costs and introducing per-attempt latency that could degrade
-        //      the responsiveness of the gateway for legitimate users.
-        //
-        //   2. Cost and latency: Each eth_sendTransaction call carries a gas
-        //      cost and a round-trip delay to the JSON-RPC endpoint.  For a
-        //      first-factor check — which is the most commonly exercised path
-        //      and the most likely target of automated attack — absorbing that
-        //      overhead on every wrong password is disproportionate.
-        //
-        //   3. Severity differentiation: Reaching the TOTP phase requires that
-        //      an attacker has already defeated the password factor, making an
-        //      OTP failure a materially higher-severity event.  It is therefore
-        //      appropriate to treat OTP lockout as a blockchain-persisted,
-        //      immutable audit record while keeping password lockout as a fast,
-        //      low-overhead in-process control.  A single LOCKOUT event IS
-        //      emitted to the blockchain when the third password failure triggers
-        //      the 30-minute cooldown, providing an auditable record of the
-        //      threshold crossing without logging every individual failed attempt.
-        // ─────────────────────────────────────────────────────────────────────
-
         // Increment password fail counter
         pthread_mutex_lock(&s_session_mutex);
         auto& rec = s_pass_fails[username];
@@ -1121,14 +1094,6 @@ MHD_Result HttpsServer::handleLoginPost(struct MHD_Connection* connection,
             + std::to_string(rec.count) + "/" + std::to_string(MAX_PASSWORD_FAILS) + ")");
 
         if (pw_remaining <= 0) {
-            // Emit a single LOCKOUT event to the blockchain when the threshold
-            // is crossed.  This is the only password-related event written on-
-            // chain — individual failed attempts are intentionally kept local
-            // to avoid per-attempt gas cost and latency (see rationale above).
-            if (s_blockchain) {
-                s_blockchain->logEvent(username, BlockchainLogger::LOCKOUT, sid_for_log);
-                addActivityLog("[BLOCKCHAIN] LOCKOUT logged (password threshold) for '" + username + "' — queued if offline");
-            }
             return sendResponse(connection,
                 "<html><body><h1>Account Locked</h1>"
                 "<p>Too many failed password attempts. Contact an administrator.</p>"
