@@ -1,0 +1,12 @@
+# Ignore raw log output — only commit curated results
+logs/*/TC-*.log
+logs/*/TC-*.log.body
+logs/*/TC-*.log.headers
+logs/*/TC-*.headers_raw
+logs/*/TC-*.curl_err
+logs/*/cookies.txt
+logs/*/tc*_cookies.txt
+
+# Keep the results summary and the JSON
+!logs/*/results.log
+!logs/*/summary.json

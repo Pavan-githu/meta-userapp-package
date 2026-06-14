@@ -1,0 +1,622 @@
+RaceIoT Gateway — Live Demo Presentation Script
+================================================
+Panel Demo: End-to-End Build → Boot → MFA Login
+Screen-recording guide with narration notes and backend context
+
+Each section = one slide. Left column = what panel sees. Right column = what you say.
+Run commands exactly as written. Open terminals BEFORE recording starts.
+================================================
+
+
+════════════════════════════════════════════════════════════════════
+SLIDE 1 — Title Slide
+════════════════════════════════════════════════════════════════════
+
+ON SCREEN:
+  Title card (PowerPoint/Canva):
+    "RaceIoT IoT Gateway — Live System Demonstration"
+    Subtitle: "Yocto Build → Raspberry Pi Boot → HTTPS + TOTP MFA + Blockchain Audit"
+    Your name, date, institution
+
+NARRATION:
+  "Today I will demonstrate the complete RaceIoT IoT Gateway system —
+   from source code compilation all the way to a user securely logging
+   in using two-factor authentication over an mTLS-protected HTTPS server,
+   with every authentication event recorded immutably on the Ethereum blockchain."
+
+BACKEND: Nothing running yet. Prepare terminals.
+
+PRE-RECORDING CHECKLIST:
+  [ ] Raspberry Pi + SD card + USB-serial cable ready
+  [ ] TeraTerm open, COM port selected, 115200 baud
+  [ ] Build machine terminal open at: ~/capstone1/raceiotprj/
+  [ ] Google Authenticator installed on phone
+  [ ] Blockchain VPS reachable (ping test)
+  [ ] Screen recorder (OBS / asciinema) ready
+
+
+════════════════════════════════════════════════════════════════════
+SLIDE 2 — System Architecture Overview
+════════════════════════════════════════════════════════════════════
+
+ON SCREEN:
+  Architecture diagram showing:
+    [Browser / Phone] ──HTTPS──► [Cloudflare Tunnel]
+                                        │  mTLS
+                                        ▼
+                              [Raspberry Pi :8443]
+                              ┌──────────────────┐
+                              │  iot-gateway     │
+                              │  HTTPS Server    │
+                              │  TOTP MFA        │
+                              │  Blockchain Log  │
+                              └──────────────────┘
+                                        │
+                                        ▼
+                              [Ethereum Node (VPS)]
+
+NARRATION:
+  "The gateway runs on Raspberry Pi, built with Yocto Linux.
+   It exposes an HTTPS server on port 8443. Cloudflare Tunnel provides
+   public access with mutual TLS — only our authorised tunnel can reach
+   the server port. Authentication uses PBKDF2 password hashing plus
+   TOTP two-factor authentication. Every login event is logged as an
+   immutable transaction on the Ethereum blockchain."
+
+BACKEND: Keep diagram on screen. Transition to next slide.
+
+
+════════════════════════════════════════════════════════════════════
+SLIDE 3 — Step 1: Build the Yocto Image
+════════════════════════════════════════════════════════════════════
+
+ON SCREEN:
+  Terminal — full screen
+
+COMMANDS TO RUN LIVE (or show pre-recorded output):
+  cd ~/capstone1/raceiotprj
+  source sources/poky/oe-init-build-env build
+  bitbake core-image-minimal 2>&1 | tail -30
+
+  # When complete, show the output image:
+  ls -lh tmp/deploy/images/raspberrypi4-64/*.wic.bz2
+
+NARRATION:
+  "The entire operating system is compiled from source using Yocto Project.
+   Our custom layer 'meta-userapp-package' adds the iot-gateway application,
+   cloudflared tunnel, and network configuration recipes directly into the image.
+   The build system cross-compiles everything for the ARM64 Raspberry Pi target.
+   This is the final compressed image — approximately [X] MB."
+
+BACKEND:
+  BitBake reads our recipe:
+    meta-userapp-package/recipes-apps/iot-gateway/iot-gateway-apps_0.1.bb
+  Compiles https_server.cpp, user_auth.cpp, blockchain_logger.cpp, otp_manager.cpp
+  Links against libmicrohttpd, GnuTLS, libgnutls, pthread
+  Packages binary into rootfs at /usr/bin/iot-gateway
+
+WHAT TO HIGHLIGHT:
+  Point to the .wic.bz2 file size and timestamp — proves it was just built
+
+
+════════════════════════════════════════════════════════════════════
+SLIDE 4 — Step 2: Copy Image to Local PC and Flash SD Card
+════════════════════════════════════════════════════════════════════
+
+ON SCREEN:
+  Split: Terminal (left) + File Explorer / Raspberry Pi Imager (right)
+
+COMMANDS:
+  # Copy compressed image to local downloads folder
+  cp tmp/deploy/images/raspberrypi4-64/core-image-minimal-raspberrypi4-64.wic.bz2 \
+     ~/Downloads/raceiot-gateway.wic.bz2
+
+  # Open Raspberry Pi Imager (show GUI)
+  # Select: "Use custom image" → browse to raceiot-gateway.wic.bz2
+  # Select SD card device (e.g. /dev/sdb)
+  # Click WRITE
+
+NARRATION:
+  "I copy the compiled image to my local machine and use the official
+   Raspberry Pi Imager tool to flash it directly to the SD card.
+   The tool verifies the write — so what boots on the Pi is exactly what
+   Yocto compiled. No manual modifications after build."
+
+BACKEND:
+  Imager decompresses .wic.bz2 on the fly
+  Writes two partitions: boot (FAT32) + rootfs (ext4)
+  Verifies SHA256 checksum after write
+
+WHAT TO SHOW:
+  The progress bar completing and the green "Write Successful" tick
+
+
+════════════════════════════════════════════════════════════════════
+SLIDE 5 — Step 3: Boot the Raspberry Pi — Serial Console
+════════════════════════════════════════════════════════════════════
+
+ON SCREEN:
+  TeraTerm serial terminal — full screen
+  Settings: 115200 baud, 8N1, no flow control
+
+ACTIONS:
+  1. Insert SD card into Raspberry Pi
+  2. Connect USB-to-serial adapter: TX→GPIO15 (RXD), RX→GPIO14 (TXD), GND→GND
+  3. Plug in power cable
+  4. Watch TeraTerm fill with boot messages
+
+KEY BOOT LINES TO POINT AT (they scroll past):
+  [    0.000000] Booting Linux on physical CPU 0x0000000000 [0x410fd083]
+  [    1.234567] mmc0: new high speed SDHC card
+  [    2.345678] EXT4-fs (mmcblk0p2): mounted filesystem
+  ...
+  Starting iot-gateway.service...
+  [mTLS] Root CA loaded from /etc/iot-gateway/rootca.crt — client certificate enforcement ENABLED
+  HTTPS Server Started Successfully!
+  Port: 8443
+
+NARRATION:
+  "The SD card is inserted, power connected. We can see the Linux kernel
+   booting — U-Boot bootloader, kernel decompression, filesystem mount.
+   Systemd then starts our iot-gateway service automatically.
+   The critical lines here are: mTLS Root CA loaded — confirming client
+   certificate enforcement is active — and HTTPS Server Started on port 8443."
+
+BACKEND:
+  systemd reads /lib/systemd/system/iot-gateway.service
+  Executes: /usr/bin/iot-gateway
+  main.cpp: instantiates HttpsServer, UserAuth, BlockchainLogger
+  HttpsServer::start() called with cert/key/rootca paths
+  MHD_start_daemon() binds port 8443 with MHD_USE_SSL + MHD_OPTION_HTTPS_MEM_TRUST
+
+
+════════════════════════════════════════════════════════════════════
+SLIDE 6 — Step 4: Copy Blockchain Smart Contract Details
+════════════════════════════════════════════════════════════════════
+
+ON SCREEN:
+  Terminal — SSH into Pi or use serial console
+
+COMMANDS:
+  # From build machine — copy blockchain config to Pi
+  scp /path/to/contract_address.txt  root@<pi-ip>:/etc/iot-gateway/
+  scp /path/to/abi.json              root@<pi-ip>:/etc/iot-gateway/
+  scp /path/to/wallet_key.txt        root@<pi-ip>:/etc/iot-gateway/
+
+  # On Pi — verify files are in place
+  ls -la /etc/iot-gateway/
+  cat /etc/iot-gateway/contract_address.txt
+
+  # Restart service to pick up config
+  systemctl restart iot-gateway
+  journalctl -fu iot-gateway
+
+NARRATION:
+  "The blockchain logger needs three things: the deployed smart contract address
+   on the Ethereum network, the contract ABI so it knows how to call functions,
+   and the wallet private key used to sign transactions.
+   These are copied to the protected /etc/iot-gateway directory on the Pi's
+   rootfs. After restarting the service, the log shows the Ethereum node
+   is reachable and the contract is loaded."
+
+BACKEND:
+  BlockchainLogger constructor reads these files
+  Establishes JSON-RPC connection to Ethereum node
+  Calls checkConnectivity() — verifies eth_blockNumber responds
+  Logs: "[Blockchain] Connected to Ethereum node, contract loaded"
+
+WHAT TO SHOW:
+  journalctl output confirming blockchain connectivity
+
+
+════════════════════════════════════════════════════════════════════
+SLIDE 7 — Step 5: Connect Pi to WiFi / Network Scan
+════════════════════════════════════════════════════════════════════
+
+ON SCREEN:
+  Split: TeraTerm serial (left) + phone/laptop WiFi scanner (right)
+
+COMMANDS ON PI (serial terminal):
+  # Check network is up
+  ip addr show wlan0
+  ping -c 3 8.8.8.8
+
+  # Note the IP address displayed
+  ip addr show wlan0 | grep "inet "
+
+NARRATION:
+  "Our Yocto image includes a pre-configured network recipe that sets wlan0
+   to DHCP on the target network. The Pi connects automatically on boot.
+   Here we confirm the IP address assigned — this is the address we will
+   use to reach the HTTPS server from any device on the same network."
+
+BACKEND:
+  systemd-networkd reads /etc/systemd/network/20-wlan0-dhcp.network
+  wpa_supplicant authenticates to the WiFi AP
+  DHCP assigns IP address
+  HttpsServer::getLocalIPAddress() already printed this IP in the boot log
+
+WHAT TO SHOW:
+  The wlan0 inet address (e.g. 192.168.1.105)
+  Successful ping to confirm internet reachability (for blockchain)
+
+
+════════════════════════════════════════════════════════════════════
+SLIDE 8 — Step 6: Open Browser — Landing Page
+════════════════════════════════════════════════════════════════════
+
+ON SCREEN:
+  Browser (Chrome/Firefox) on laptop or phone — full screen
+
+ACTION:
+  Navigate to: https://192.168.1.105:8443
+  (replace with actual Pi IP)
+
+  Browser will show security warning — click "Advanced" → "Proceed"
+  (expected: self-signed cert, not a CA-issued cert)
+
+  Landing page appears:
+    "RaceIoT Device"
+    "Welcome! Please register or log in to continue."
+    [Register] [Login] buttons
+
+NARRATION:
+  "From a laptop on the same network I navigate to the Pi's IP on port 8443.
+   The browser warns about the self-signed certificate — this is expected
+   in our development setup. In production, Cloudflare Tunnel handles the
+   public TLS certificate. The landing page is served by our C++ HTTPS server
+   running directly on the Pi — no cloud, no middleware."
+
+BACKEND:
+  Browser sends TLS ClientHello
+  MHD / GnuTLS completes TLS handshake (presents server.crt)
+  HTTP GET / → HttpsServer::answerToConnection() → handleGetRequest()
+  Returns landing page HTML with 200 OK
+
+WHAT TO SHOW ON TERMINAL (Pi):
+  journalctl -fu iot-gateway
+  Should show:
+    Handling GET request for URL: /
+    Sending response with status code: 200
+
+
+════════════════════════════════════════════════════════════════════
+SLIDE 9 — Step 7: Register New User
+════════════════════════════════════════════════════════════════════
+
+ON SCREEN:
+  Browser — Registration form
+  Terminal (Pi logs) — side panel or second monitor
+
+ACTION IN BROWSER:
+  1. Click "Register"
+  2. Enter: Username = paneldemo   Password = Panel@2024!
+  3. Click "Register"
+  4. Success page loads showing:
+     - "Registration Successful!"
+     - TOTP QR code image
+     - Instructions to scan with Google Authenticator
+
+NARRATION:
+  "I click Register and enter a username and password.
+   The password policy requires minimum 8 characters, uppercase, lowercase,
+   digit, and special character — weak passwords are rejected server-side
+   before any database write occurs.
+   On success, the server generates a unique TOTP secret for this user,
+   stores it hashed alongside the PBKDF2 password hash, and returns
+   an otpauth:// QR code URI for the authenticator app."
+
+BACKEND (show these log lines):
+  Handling POST register request...
+  [Register] New user registered: paneldemo
+  [REGISTER] User 'paneldemo' registered successfully
+  [BLOCKCHAIN] Node unreachable — seed not committed  (or: Seed commitment submitted)
+
+  INTERNALLY:
+    validatePassword() — checks 5 policy rules
+    UserAuth::registerUser() — PBKDF2-SHA256 hash + random salt
+    OTPManager::generateTOTPSecret() — 20-byte random Base32 secret
+    OTPManager::buildOtpauthURI() — encodes as otpauth://totp/...
+    QR code rendered via qrserver.com API
+
+WHAT TO HIGHLIGHT:
+  The QR code appearing on screen — point out it is generated uniquely per user
+
+
+════════════════════════════════════════════════════════════════════
+SLIDE 10 — Step 8: Scan QR Code with Google Authenticator
+════════════════════════════════════════════════════════════════════
+
+ON SCREEN:
+  Phone screen (mirrored via scrcpy or held to camera) + Browser QR side by side
+
+ACTION:
+  1. Open Google Authenticator on phone
+  2. Tap "+" → "Scan QR code"
+  3. Point camera at QR code on browser screen
+  4. Account "RaceIoT-Gateway:paneldemo" appears in the app
+  5. A 6-digit rotating code is shown (refreshes every 30 seconds)
+
+NARRATION:
+  "I open Google Authenticator on my phone and scan the QR code.
+   The app decodes the otpauth URI and stores the TOTP secret locally
+   on the phone. It immediately begins generating time-based one-time
+   passwords — a new 6-digit code every 30 seconds using HMAC-SHA1
+   over the current Unix timestamp divided by 30.
+   This secret never leaves the phone after initial setup."
+
+BACKEND:
+  QR encodes: otpauth://totp/RaceIoT-Gateway:paneldemo?secret=BASE32SECRET&issuer=RaceIoT-Gateway
+  Phone app decodes Base32 secret
+  TOTP algorithm: HOTP(secret, floor(time/30)) truncated to 6 digits
+  Server stores same secret via UserAuth::registerUser()
+
+WHAT TO SHOW:
+  The 6-digit code ticking down on the phone
+  Point out the 30-second countdown ring in the app
+
+
+════════════════════════════════════════════════════════════════════
+SLIDE 11 — Step 9: Login — Password Phase
+════════════════════════════════════════════════════════════════════
+
+ON SCREEN:
+  Browser — Login form
+  Pi terminal — journalctl -fu iot-gateway
+
+ACTION IN BROWSER:
+  1. Navigate to /login (or click "Log In" button)
+  2. Enter: Username = paneldemo   Password = Panel@2024!
+  3. Click Login
+  4. Browser redirects to /otp page
+
+NARRATION:
+  "I navigate to the login page. Notice the green blockchain status banner —
+   confirming the Ethereum node is reachable. I enter my credentials.
+   The server validates the password against the PBKDF2 hash — the plaintext
+   password is never stored anywhere. On success, it generates a unique
+   session ID, stores an OTP-pending record, and redirects to the OTP page
+   with a Secure HttpOnly cookie — the session ID cannot be read by JavaScript."
+
+BACKEND (show these log lines):
+  Handling POST login request...
+  [LOGIN] Password OK for 'paneldemo' — OTP phase starting
+  [BLOCKCHAIN] Login attempt logged for 'paneldemo' (tx submitted)
+
+  INTERNALLY:
+    UserAuth::isValidUsername() — rejects injection chars
+    UserAuth::authenticate() — PBKDF2 verify (constant-time)
+    BlockchainLogger::generateSessionId() — UUID v4
+    s_sessions[session_id] = PendingOTP{...expires in 120s}
+    Set-Cookie: iotgw_session=<uuid>; HttpOnly; Secure; SameSite=Strict; Path=/otp; Max-Age=120
+
+WHAT TO HIGHLIGHT:
+  The Set-Cookie header in browser DevTools (F12 → Network tab)
+  The HttpOnly flag — proves JS cannot steal this cookie
+
+
+════════════════════════════════════════════════════════════════════
+SLIDE 12 — Step 10: OTP Verification — TOTP Phase
+════════════════════════════════════════════════════════════════════
+
+ON SCREEN:
+  Browser — OTP page (countdown timer visible)
+  Phone — Google Authenticator showing current 6-digit code
+
+ACTION:
+  1. OTP page shows 2:00 countdown
+  2. Look at Google Authenticator → current code e.g. 482 910
+  3. Enter code into browser OTP field (no spaces)
+  4. Click "Verify OTP"
+  5. Dashboard loads
+
+NARRATION:
+  "The OTP page shows a 2-minute countdown. I check my Google Authenticator
+   app and enter the current 6-digit code. The server independently computes
+   the same code using the stored TOTP secret and the current timestamp —
+   it accepts the current window and one window either side to account for
+   clock drift. The verification is constant-time to prevent timing attacks."
+
+BACKEND (show log lines):
+  Handling POST OTP request...
+  [OTP] Verified successfully for 'paneldemo'
+  [BLOCKCHAIN] OTP_SUCCESS logged for 'paneldemo' — access granted
+
+  INTERNALLY:
+    readSessionCookie() — validates iotgw_session cookie
+    s_sessions.find(session_id) — confirms session exists and not expired
+    OTPManager::verifyTOTP(secret, "482910") — RFC 6238 TOTP verify ±1 window
+    s_sessions.erase(session_id) — one-time use: session deleted after success
+    MHD_add_response_header: Set-Cookie iotgw_session=; Max-Age=0  (clears cookie)
+
+WHAT TO HIGHLIGHT:
+  The dashboard appearing with: "Identity verified by TOTP and recorded on the blockchain"
+  The truncated blockchain session ID shown on the dashboard
+
+
+════════════════════════════════════════════════════════════════════
+SLIDE 13 — Step 11: Blockchain Audit Log — Live Evidence
+════════════════════════════════════════════════════════════════════
+
+ON SCREEN:
+  Browser → https://<pi-ip>:8443/status
+  (auto-refreshes every 15 seconds)
+
+NARRATION:
+  "The /status page shows the live system status and blockchain activity log.
+   We can see the events from our login: REGISTER, then BLOCKCHAIN seed attempt,
+   then LOGIN attempt, OTP_SENT, and OTP_SUCCESS — all timestamped.
+   These events are not just logged here in memory; they were submitted as
+   Ethereum transactions. The blockchain session ID on the dashboard
+   corresponds to the transaction that can be verified on the Ethereum node."
+
+WHAT TO SHOW ON STATUS PAGE:
+  - HTTPS Server: green tick — Running
+  - Ethereum Node: green tick — Reachable
+  - Activity log table with coloured rows:
+      HH:MM:SS   [REGISTER] User 'paneldemo' registered successfully    (white)
+      HH:MM:SS   [BLOCKCHAIN] OTP_SENT logged for 'paneldemo'           (blue)
+      HH:MM:SS   [BLOCKCHAIN] OTP_SUCCESS logged for 'paneldemo'        (green)
+
+OPTIONAL — Show raw blockchain TX (if Ethereum node has explorer):
+  curl http://<vps-ip>:8545 \
+    -X POST -H "Content-Type: application/json" \
+    -d '{"jsonrpc":"2.0","method":"eth_getLogs","params":[{"fromBlock":"latest"}],"id":1}'
+
+
+════════════════════════════════════════════════════════════════════
+SLIDE 14 — Security Feature: Lockout Demo (Optional but impressive)
+════════════════════════════════════════════════════════════════════
+
+ON SCREEN:
+  Browser — Login page
+
+ACTION:
+  1. Enter wrong password 3 times for user "paneldemo"
+  2. Show the countdown lockout modal (30-minute timer with progress bar)
+  3. Show the blockchain log: LOCKOUT event emitted after 3rd failure
+
+NARRATION:
+  "To demonstrate brute-force protection: three wrong passwords trigger
+   a 30-minute account lockout. The lockout modal shows an animated
+   countdown timer. Critically — individual failed attempts are NOT
+   written to the blockchain each time, to avoid gas costs from
+   automated attacks. Only when the threshold is crossed does a single
+   immutable LOCKOUT event get recorded on-chain.
+   The same lockout applies to the OTP phase — three wrong codes also
+   lock the account."
+
+BACKEND (show log):
+  [LOGIN] FAILED password for 'paneldemo' (1/3)
+  [LOGIN] FAILED password for 'paneldemo' (2/3)
+  [LOGIN] FAILED password for 'paneldemo' (3/3)
+  [BLOCKCHAIN] LOCKOUT logged (password threshold) for 'paneldemo'
+
+WHAT TO HIGHLIGHT:
+  Only ONE blockchain line for 3 failures (gas-efficient design decision)
+  The animated progress bar counting down
+
+
+════════════════════════════════════════════════════════════════════
+SLIDE 15 — Security Feature: mTLS Demo (Optional)
+════════════════════════════════════════════════════════════════════
+
+ON SCREEN:
+  Two terminal windows side by side
+
+LEFT TERMINAL — Attacker (no cert):
+  curl --insecure --verbose https://<pi-ip>:8443/
+  # Shows: SSL_connect: Connection reset — NO HTTP response
+
+RIGHT TERMINAL — Authorised client:
+  curl --insecure --verbose \
+       --cert ~/mtls-demo/client-authorised.crt \
+       --key  ~/mtls-demo/client-authorised.key \
+       https://<pi-ip>:8443/
+  # Shows: HTTP/1.1 200 OK — landing page received
+
+NARRATION:
+  "This is mutual TLS in action. On the left — a direct connection
+   without a client certificate. GnuTLS rejects it at the handshake —
+   no HTTP data is ever transmitted. The attacker cannot even see the
+   login page. On the right — a client presenting a certificate signed
+   by our Root CA gets through immediately. In production, only cloudflared
+   holds this certificate."
+
+Pi log shows:
+  Left: nothing (connection never reaches MHD layer)
+  Right: Handling GET request for URL: /
+
+
+════════════════════════════════════════════════════════════════════
+SLIDE 16 — Summary and Q&A
+════════════════════════════════════════════════════════════════════
+
+ON SCREEN:
+  Summary slide (PowerPoint/Canva):
+
+  What was demonstrated end-to-end:
+  ✅  Yocto cross-compilation — custom OS image from source
+  ✅  Raspberry Pi boot — systemd service auto-start, serial console
+  ✅  HTTPS server — C++ / libmicrohttpd, TLS 1.3 on-device
+  ✅  User registration — PBKDF2-SHA256, password policy enforcement
+  ✅  TOTP MFA — RFC 6238, Google Authenticator, QR code provisioning
+  ✅  Account lockout — 30-min cooldown, brute-force resistant
+  ✅  Blockchain audit — Ethereum event log, immutable trail
+  ✅  mTLS — Root CA client-cert enforcement (cloudflared only)
+  ✅  Cloudflare Tunnel — public HTTPS without port forwarding
+
+NARRATION:
+  "Everything shown ran live — no pre-recorded video, no simulation.
+   The source code, Yocto recipes, test plans, and blockchain integration
+   are all version-controlled in Git. I am happy to take questions on
+   any specific component."
+
+
+════════════════════════════════════════════════════════════════════
+SCREEN RECORDING SETUP (read before you start)
+════════════════════════════════════════════════════════════════════
+
+TOOLS:
+  OBS Studio (Linux/Windows/Mac)  — recommended for panel recording
+    - Scene 1: Full desktop
+    - Scene 2: Browser only
+    - Scene 3: Terminal only (for log tailing)
+    - Scene 4: Split: browser left + terminal right
+
+  OR: asciinema (terminal-only sections)
+    asciinema rec demo.cast --title "RaceIoT Gateway Live Demo"
+
+  OR: SimpleScreenRecorder (Linux)
+    simplescreenrecorder → follow wizard → MP4 H.264
+
+RESOLUTION: 1920×1080 minimum. Font size: 18pt terminal, 16pt browser zoom 110%
+
+COLOUR SCHEME for terminal (helps readability on projector):
+  Background: #1e1e1e   Foreground: #d4d4d4   (VS Code Dark+ style)
+  Or: simple black background, white text — highest contrast
+
+LAYOUT FOR DEMO (tmux):
+  tmux new-session \; \
+    split-window -h \; \
+    send-keys -t 0 "ssh root@<pi-ip> journalctl -fu iot-gateway" Enter \; \
+    send-keys -t 1 "echo 'Attacker terminal ready'" Enter
+
+  Left pane: Pi live logs (always visible)
+  Right pane: curl commands / browser (alt-tab)
+
+PHONE MIRRORING (to show Google Authenticator on screen):
+  Android: scrcpy  →  sudo apt install scrcpy && scrcpy
+  iOS:     QuickTime Player (Mac) or Reflector app
+
+BEFORE YOU HIT RECORD:
+  1. Boot Pi and confirm HTTPS server log shows "Started Successfully"
+  2. Confirm blockchain connectivity: curl <vps>:8545 responds
+  3. Delete any existing test users (fresh demo):
+       rm /etc/iot-gateway/users.db   (or equivalent)
+       systemctl restart iot-gateway
+  4. Clear browser cookies and cache
+  5. Close all irrelevant windows
+  6. Set phone brightness to maximum
+  7. Do a 30-second dry run — check audio levels if narrating
+
+SLIDE TIMING GUIDE:
+  Slide 1  (Title)              30 s
+  Slide 2  (Architecture)        2 min
+  Slide 3  (Build)               3 min  (show pre-built output if time limited)
+  Slide 4  (Flash SD)            2 min
+  Slide 5  (Boot / TeraTerm)     3 min
+  Slide 6  (Blockchain config)   2 min
+  Slide 7  (WiFi / IP)           1 min
+  Slide 8  (Browser / landing)   1 min
+  Slide 9  (Register)            2 min
+  Slide 10 (Scan QR)             2 min
+  Slide 11 (Login password)      2 min
+  Slide 12 (OTP verify)          2 min
+  Slide 13 (Status / blockchain) 2 min
+  Slide 14 (Lockout demo)        2 min  (optional)
+  Slide 15 (mTLS demo)           2 min  (optional)
+  Slide 16 (Summary / Q&A)       open
+  ─────────────────────────────────────
+  Total core demo:              ~25 min
+  With optional slides:         ~29 min
