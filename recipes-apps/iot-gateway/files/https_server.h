@@ -104,6 +104,10 @@ private:
     // presented by cloudflared on every inbound TLS handshake.
     // Null when mTLS client-cert enforcement is disabled.
     char* trust_pem;
+    // True when Root CA was loaded and MHD_OPTION_HTTPS_MEM_TRUST is active.
+    // Used by the HTTP handler to enforce client-cert rejection at app layer
+    // because GnuTLS requests (but does not mandate) a client cert by default.
+    bool mtls_enabled = false;
     int port;
     bool running = false;
     std::string bind_address;

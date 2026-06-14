@@ -374,10 +374,17 @@ bool HttpsServer::start(const char* cert_file, const char* key_file,
             &HttpsServer::answerToConnection, this,
             MHD_OPTION_HTTPS_MEM_CERT,  cert_pem,
             MHD_OPTION_HTTPS_MEM_KEY,   key_pem,
-            MHD_OPTION_HTTPS_MEM_TRUST, trust_pem,   // enforce client cert
+            MHD_OPTION_HTTPS_MEM_TRUST, trust_pem,   // sets trust store; requests client cert
             MHD_OPTION_NOTIFY_COMPLETED, HttpsServer::requestCompleted, nullptr,
             MHD_OPTION_END
         );
+        // Store flag so answerToConnection can enforce client cert at app layer.
+        // GnuTLS with MHD_OPTION_HTTPS_MEM_TRUST requests a client cert but does
+        // not reject the connection when none is provided (GNUTLS_CERT_REQUIRE is
+        // not set by libmicrohttpd). We therefore check gnutls_certificate_get_peers()
+        // inside the HTTP handler and return 403 for any request that arrives
+        // without a certificate signed by the trusted Root CA.
+        this->mtls_enabled = true;
     } else {
         // mTLS not available — start without client-cert requirement.
         // Suitable for local development; NOT recommended for production.
@@ -1540,6 +1547,64 @@ MHD_Result HttpsServer::sendResponse(struct MHD_Connection* connection,
 }
 
 // Main request handler
+// ---------------------------------------------------------------------------
+// enforceClientCert
+// Application-layer mTLS enforcement.
+//
+// GnuTLS with MHD_OPTION_HTTPS_MEM_TRUST sends a CertificateRequest during
+// the TLS handshake but does NOT abort the handshake when the peer presents
+// no certificate or an untrusted one (GNUTLS_CERT_REQUIRE is not set by
+// libmicrohttpd). This function retrieves the GnuTLS session from the MHD
+// connection, checks whether the peer actually sent a certificate, and then
+// verifies that the presented certificate was accepted by the GnuTLS trust
+// store (i.e., signed by our Root CA). Returns false (reject) if:
+//   - No peer certificate was presented (empty Certificate handshake message)
+//   - GnuTLS certificate verification status is non-zero (untrusted CA, etc.)
+// ---------------------------------------------------------------------------
+static bool enforceClientCert(struct MHD_Connection* connection) {
+    const union MHD_ConnectionInfo* info =
+        MHD_get_connection_info(connection, MHD_CONNECTION_INFO_GNUTLS_SESSION);
+    if (!info || !info->tls_session) {
+        std::cerr << "[mTLS] Cannot retrieve GnuTLS session from connection\n";
+        return false;
+    }
+    gnutls_session_t session =
+        reinterpret_cast<gnutls_session_t>(info->tls_session);
+
+    // Check whether the peer sent any certificate at all
+    unsigned int list_size = 0;
+    const gnutls_datum_t* cert_list =
+        gnutls_certificate_get_peers(session, &list_size);
+    if (!cert_list || list_size == 0) {
+        std::cerr << "[mTLS] REJECT: No client certificate presented\n";
+        return false;
+    }
+
+    // Verify that the presented certificate is trusted (signed by Root CA).
+    // gnutls_certificate_verify_peers2() re-checks the peer cert chain against
+    // the trust store configured via MHD_OPTION_HTTPS_MEM_TRUST.
+    unsigned int verify_status = 0;
+    int rc = gnutls_certificate_verify_peers2(session, &verify_status);
+    if (rc < 0) {
+        std::cerr << "[mTLS] REJECT: GnuTLS verify error: "
+                  << gnutls_strerror(rc) << "\n";
+        return false;
+    }
+    if (verify_status != 0) {
+        gnutls_datum_t out = {};
+        gnutls_certificate_verification_status_print(
+            verify_status, GNUTLS_CRT_X509, &out, 0);
+        std::cerr << "[mTLS] REJECT: Client cert not trusted: "
+                  << (out.data ? reinterpret_cast<char*>(out.data) : "unknown")
+                  << "\n";
+        gnutls_free(out.data);
+        return false;
+    }
+
+    std::cout << "[mTLS] Client certificate accepted — chain verified OK\n";
+    return true;
+}
+
 MHD_Result HttpsServer::answerToConnection(void* cls, struct MHD_Connection* connection,
                                           const char* url, const char* method,
                                           const char* version, const char* upload_data,
@@ -1553,6 +1618,28 @@ MHD_Result HttpsServer::answerToConnection(void* cls, struct MHD_Connection* con
             std::cout << "Marking connection as POST request" << std::endl;
             con_info->setIsPost(true);
         }
+
+        // ── Application-layer mTLS enforcement ──────────────────────────────
+        // GnuTLS requests a client cert during the TLS handshake but does NOT
+        // reject the connection when the peer sends no cert or an untrusted
+        // one. We check here on the first call (before any data is processed)
+        // and return 403 immediately for any connection that fails the check.
+        HttpsServer* self = static_cast<HttpsServer*>(cls);
+        if (self && self->mtls_enabled && !enforceClientCert(connection)) {
+            delete con_info;
+            *con_cls = nullptr;
+            const char* body =
+                "<html><body><h1>403 Forbidden</h1>"
+                "<p>A valid client certificate signed by the device Root CA "
+                "is required to access this server.</p></body></html>";
+            struct MHD_Response* resp = MHD_create_response_from_buffer(
+                strlen(body), const_cast<char*>(body), MHD_RESPMEM_PERSISTENT);
+            MHD_add_response_header(resp, "Content-Type", "text/html");
+            MHD_Result r = MHD_queue_response(connection, MHD_HTTP_FORBIDDEN, resp);
+            MHD_destroy_response(resp);
+            return r;
+        }
+        // ────────────────────────────────────────────────────────────────────
         
         *con_cls = con_info;
         return MHD_YES;
