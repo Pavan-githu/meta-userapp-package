@@ -9,6 +9,10 @@
 #include <csignal>
 #include <cstdlib>
 #include <unistd.h>
+#include <openssl/x509.h>
+#include <openssl/x509v3.h>
+#include <openssl/pem.h>
+#include <openssl/err.h>
 
 // Global variables for cleanup
 GPIO* led_gpio = nullptr;
@@ -157,7 +161,36 @@ void* wifiManagerThread(void* arg) {
 // Thread function for certificate management
 void* certificateManagementThread(void* arg) {
     std::cout << "[Certificate Thread] Started" << std::endl;
-    
+
+    // ── Wait for system clock to be NTP-synchronized ─────────────────────────
+    // The Pi 3 has no hardware RTC. On first boot the clock starts from the
+    // fake-hwclock saved timestamp (often years in the past). Certificate
+    // validity dates are embedded at generation time, so generating before
+    // NTP sync produces certs with wrong notBefore/notAfter values.
+    // We poll timedatectl until "synchronized: yes" or until 60 s elapses.
+    {
+        bool synced = false;
+        for (int i = 0; i < 60 && !synced; ++i) {
+            FILE* fp = popen("timedatectl show --property=NTPSynchronized --value 2>/dev/null", "r");
+            if (fp) {
+                char buf[16] = {};
+                if (fgets(buf, sizeof(buf), fp))
+                    synced = (std::string(buf).find("yes") != std::string::npos);
+                pclose(fp);
+            }
+            if (!synced) {
+                if (i == 0)
+                    std::cout << "[Certificate] Waiting for NTP clock sync before generating certs..." << std::endl;
+                sleep(1);
+            }
+        }
+        if (synced)
+            std::cout << "[Certificate] NTP synchronized — system clock is correct." << std::endl;
+        else
+            std::cerr << "[Certificate] WARNING: NTP sync timeout — certs may carry wrong date." << std::endl;
+    }
+    // ─────────────────────────────────────────────────────────────────────────
+
     // Certificate management
     std::string cert_directory = "/etc/https-server";
     CertificateManager cert_manager(cert_directory);
@@ -194,9 +227,170 @@ void* certificateManagementThread(void* arg) {
     std::cout << "[Certificate] Client cert: " << cert_manager.getClientCertPath() << std::endl;
     std::cout << "[Certificate] Client key: " << cert_manager.getClientKeyPath() << std::endl;
     
+    // ── Certificate Validation ─────────────────────────────────────────────
+    // After generation (or loading existing certs), validate all certificates:
+    //   1. Server cert is signed by Root CA
+    //   2. Client cert is signed by Root CA
+    //   3. Server cert private key matches the certificate public key
+    //   4. No certificate in the chain is expired
+    //   5. Server cert SAN contains at least one DNS entry
+    {
+        bool validation_ok = true;
+
+        // Load Root CA
+        FILE* ca_fp = fopen(cert_manager.getRootCertPath().c_str(), "r");
+        X509* ca_cert = ca_fp ? PEM_read_X509(ca_fp, nullptr, nullptr, nullptr) : nullptr;
+        if (ca_fp) fclose(ca_fp);
+
+        if (!ca_cert) {
+            std::cerr << "[CertValidate] FAIL: Cannot load Root CA: "
+                      << cert_manager.getRootCertPath() << std::endl;
+            validation_ok = false;
+        }
+
+        // Build trusted store from Root CA
+        X509_STORE* store = X509_STORE_new();
+        if (store && ca_cert)
+            X509_STORE_add_cert(store, ca_cert);
+
+        // ── Validate server certificate ───────────────────────────────────
+        FILE* srv_fp = fopen(cert_manager.getServerCertPath().c_str(), "r");
+        X509* srv_cert = srv_fp ? PEM_read_X509(srv_fp, nullptr, nullptr, nullptr) : nullptr;
+        if (srv_fp) fclose(srv_fp);
+
+        if (!srv_cert) {
+            std::cerr << "[CertValidate] FAIL: Cannot load server cert: "
+                      << cert_manager.getServerCertPath() << std::endl;
+            validation_ok = false;
+        } else if (store) {
+            X509_STORE_CTX* ctx = X509_STORE_CTX_new();
+            X509_STORE_CTX_init(ctx, store, srv_cert, nullptr);
+            if (X509_verify_cert(ctx) == 1) {
+                std::cout << "[CertValidate] Server cert: chain OK — signed by Root CA" << std::endl;
+            } else {
+                std::cerr << "[CertValidate] FAIL: Server cert chain invalid: "
+                          << X509_verify_cert_error_string(X509_STORE_CTX_get_error(ctx)) << std::endl;
+                validation_ok = false;
+            }
+            X509_STORE_CTX_free(ctx);
+
+            // Check server cert expiry
+            int day = 0, sec = 0;
+            ASN1_TIME_diff(&day, &sec, nullptr, X509_get0_notAfter(srv_cert));
+            if (day < 0 || sec < 0) {
+                std::cerr << "[CertValidate] FAIL: Server cert is EXPIRED" << std::endl;
+                validation_ok = false;
+            } else {
+                std::cout << "[CertValidate] Server cert: valid for " << day << " more days" << std::endl;
+            }
+
+            // Check server cert SAN contains at least one DNS entry
+            GENERAL_NAMES* san = (GENERAL_NAMES*)X509_get_ext_d2i(
+                srv_cert, NID_subject_alt_name, nullptr, nullptr);
+            int dns_count = 0;
+            if (san) {
+                for (int i = 0; i < sk_GENERAL_NAME_num(san); ++i) {
+                    GENERAL_NAME* gn = sk_GENERAL_NAME_value(san, i);
+                    if (gn->type == GEN_DNS) ++dns_count;
+                }
+                GENERAL_NAMES_free(san);
+            }
+            if (dns_count > 0)
+                std::cout << "[CertValidate] Server cert: SAN has " << dns_count << " DNS entry/entries — OK" << std::endl;
+            else {
+                std::cerr << "[CertValidate] FAIL: Server cert SAN has no DNS entries — hostname validation will fail" << std::endl;
+                validation_ok = false;
+            }
+
+            // Verify server private key matches server cert public key
+            FILE* key_fp = fopen(cert_manager.getServerKeyPath().c_str(), "r");
+            EVP_PKEY* srv_key = key_fp ? PEM_read_PrivateKey(key_fp, nullptr, nullptr, nullptr) : nullptr;
+            if (key_fp) fclose(key_fp);
+            if (srv_key) {
+                if (X509_check_private_key(srv_cert, srv_key) == 1)
+                    std::cout << "[CertValidate] Server cert: private key matches certificate — OK" << std::endl;
+                else {
+                    std::cerr << "[CertValidate] FAIL: Server private key does NOT match certificate public key" << std::endl;
+                    validation_ok = false;
+                }
+                EVP_PKEY_free(srv_key);
+            } else {
+                std::cerr << "[CertValidate] FAIL: Cannot load server private key" << std::endl;
+                validation_ok = false;
+            }
+        }
+
+        // ── Validate client certificate ───────────────────────────────────
+        FILE* cli_fp = fopen(cert_manager.getClientCertPath().c_str(), "r");
+        X509* cli_cert = cli_fp ? PEM_read_X509(cli_fp, nullptr, nullptr, nullptr) : nullptr;
+        if (cli_fp) fclose(cli_fp);
+
+        if (!cli_cert) {
+            std::cerr << "[CertValidate] FAIL: Cannot load client cert: "
+                      << cert_manager.getClientCertPath() << std::endl;
+            validation_ok = false;
+        } else if (store) {
+            X509_STORE_CTX* ctx = X509_STORE_CTX_new();
+            X509_STORE_CTX_init(ctx, store, cli_cert, nullptr);
+            if (X509_verify_cert(ctx) == 1) {
+                std::cout << "[CertValidate] Client cert: chain OK — signed by Root CA" << std::endl;
+            } else {
+                std::cerr << "[CertValidate] FAIL: Client cert chain invalid: "
+                          << X509_verify_cert_error_string(X509_STORE_CTX_get_error(ctx)) << std::endl;
+                validation_ok = false;
+            }
+            X509_STORE_CTX_free(ctx);
+
+            // Check client cert expiry
+            int day = 0, sec = 0;
+            ASN1_TIME_diff(&day, &sec, nullptr, X509_get0_notAfter(cli_cert));
+            if (day < 0 || sec < 0) {
+                std::cerr << "[CertValidate] FAIL: Client cert is EXPIRED" << std::endl;
+                validation_ok = false;
+            } else {
+                std::cout << "[CertValidate] Client cert: valid for " << day << " more days" << std::endl;
+            }
+        }
+
+        // ── Root CA self-signature check ──────────────────────────────────
+        if (ca_cert) {
+            EVP_PKEY* ca_pub = X509_get_pubkey(ca_cert);
+            if (ca_pub) {
+                if (X509_verify(ca_cert, ca_pub) == 1)
+                    std::cout << "[CertValidate] Root CA: self-signature valid — OK" << std::endl;
+                else {
+                    std::cerr << "[CertValidate] FAIL: Root CA self-signature invalid" << std::endl;
+                    validation_ok = false;
+                }
+                EVP_PKEY_free(ca_pub);
+            }
+            // Check Root CA expiry
+            int day = 0, sec = 0;
+            ASN1_TIME_diff(&day, &sec, nullptr, X509_get0_notAfter(ca_cert));
+            if (day < 0)
+                std::cerr << "[CertValidate] FAIL: Root CA is EXPIRED" << std::endl;
+            else
+                std::cout << "[CertValidate] Root CA: valid for " << day << " more days" << std::endl;
+        }
+
+        // Cleanup
+        if (srv_cert) X509_free(srv_cert);
+        if (cli_cert) X509_free(cli_cert);
+        if (ca_cert)  X509_free(ca_cert);
+        if (store)    X509_STORE_free(store);
+
+        if (!validation_ok) {
+            std::cerr << "[CertValidate] One or more certificate checks FAILED — HTTPS server will not start" << std::endl;
+            certificates_ready = false;
+            pthread_exit(NULL);
+        }
+        std::cout << "[CertValidate] All certificate checks PASSED" << std::endl;
+    }
+    // ─────────────────────────────────────────────────────────────────────────
+
     // Signal that certificates are ready
     certificates_ready = true;
-    
+
     std::cout << "[Certificate Thread] Completed successfully" << std::endl;
     pthread_exit(NULL);
 }

@@ -1,7 +1,7 @@
 [Unit]
 Description=IoT Gateway Application with WiFi Setup
-After=network-online.target geth-dev.service deploy-contracts.service
-Wants=network-online.target
+After=network-online.target systemd-time-sync.target geth-dev.service deploy-contracts.service
+Wants=network-online.target systemd-time-sync.target
 
 [Service]
 Type=simple
