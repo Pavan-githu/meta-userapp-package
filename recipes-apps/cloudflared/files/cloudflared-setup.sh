@@ -143,9 +143,12 @@ ingress:
     originRequest:
       caPool: /etc/https-server/root-ca.crt
       originServerName: $DOMAIN
-      # Enable full mTLS (device presents client cert to backend):
-      originClientCertificate: /etc/https-server/client.crt
-      originClientKey: /etc/https-server/client.key
+      # Note: cloudflared does not support presenting a client certificate to
+      # the origin via originRequest config options.  The HTTPS server exempts
+      # loopback connections (127.0.0.1) from mTLS client-cert enforcement so
+      # that tunnel traffic arriving via cloudflared is not rejected with 403.
+      # Direct LAN connections (192.168.x.x:8443) still require a valid client
+      # certificate signed by the device Root CA.
   - service: http_status:404
 EOF
 chmod 600 "$CONFIG"

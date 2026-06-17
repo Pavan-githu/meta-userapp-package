@@ -1553,6 +1553,11 @@ MHD_Result HttpsServer::sendResponse(struct MHD_Connection* connection,
     return ret;
 }
 
+// Sentinel value stored in con_cls when mTLS enforcement rejected the
+// connection. Using a file-scope object guarantees a unique, stable address
+// that both the rejection site and the early-exit guard can compare against.
+static const int s_mtls_rejected_sentinel = 0;
+
 // Main request handler
 // ---------------------------------------------------------------------------
 // enforceClientCert
@@ -1567,8 +1572,43 @@ MHD_Result HttpsServer::sendResponse(struct MHD_Connection* connection,
 // store (i.e., signed by our Root CA). Returns false (reject) if:
 //   - No peer certificate was presented (empty Certificate handshake message)
 //   - GnuTLS certificate verification status is non-zero (untrusted CA, etc.)
+//
+// Localhost exemption: connections from 127.0.0.1 or ::1 are always accepted
+// without a client certificate. cloudflared connects from localhost to proxy
+// browser requests arriving via the Cloudflare tunnel (raceiotdevice.cc).
+// cloudflared does not support presenting a client cert to the origin in its
+// config, so we exempt the loopback address. The tunnel transport itself is
+// secured end-to-end by Cloudflare's mTLS with its own edge certificates.
 // ---------------------------------------------------------------------------
 static bool enforceClientCert(struct MHD_Connection* connection) {
+    // ── Localhost exemption (cloudflared tunnel) ──────────────────────────
+    const union MHD_ConnectionInfo* addr_info =
+        MHD_get_connection_info(connection, MHD_CONNECTION_INFO_CLIENT_ADDRESS);
+    if (addr_info && addr_info->client_addr) {
+        const struct sockaddr* sa = addr_info->client_addr;
+        bool is_loopback = false;
+        if (sa->sa_family == AF_INET) {
+            const struct sockaddr_in* s4 =
+                reinterpret_cast<const struct sockaddr_in*>(sa);
+            // 127.0.0.0/8
+            is_loopback = ((ntohl(s4->sin_addr.s_addr) >> 24) == 127);
+        } else if (sa->sa_family == AF_INET6) {
+            const struct sockaddr_in6* s6 =
+                reinterpret_cast<const struct sockaddr_in6*>(sa);
+            // ::1
+            static const uint8_t loopback6[16] =
+                {0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,1};
+            is_loopback = (memcmp(s6->sin6_addr.s6_addr,
+                                  loopback6, 16) == 0);
+        }
+        if (is_loopback) {
+            std::cout << "[mTLS] ALLOW: loopback connection (cloudflared tunnel) — "
+                         "skipping client cert check\n";
+            return true;
+        }
+    }
+    // ─────────────────────────────────────────────────────────────────────
+
     const union MHD_ConnectionInfo* info =
         MHD_get_connection_info(connection, MHD_CONNECTION_INFO_GNUTLS_SESSION);
     if (!info || !info->tls_session) {
@@ -1634,7 +1674,10 @@ MHD_Result HttpsServer::answerToConnection(void* cls, struct MHD_Connection* con
         HttpsServer* self = static_cast<HttpsServer*>(cls);
         if (self && self->mtls_enabled && !enforceClientCert(connection)) {
             delete con_info;
-            *con_cls = nullptr;
+            // Set con_cls to a non-null sentinel so MHD does not call this
+            // handler a second time with con_cls == nullptr for the same
+            // connection (which would log the REJECT message twice).
+            *con_cls = const_cast<int*>(&s_mtls_rejected_sentinel);
             const char* body =
                 "<html><body><h1>403 Forbidden</h1>"
                 "<p>A valid client certificate signed by the device Root CA "
@@ -1651,7 +1694,13 @@ MHD_Result HttpsServer::answerToConnection(void* cls, struct MHD_Connection* con
         *con_cls = con_info;
         return MHD_YES;
     }
-    
+
+    // If con_cls was set to the mTLS-rejected sentinel (non-null but not a
+    // ConnectionInfo), MHD may still call us a second time.  Bail out early.
+    if (*con_cls == const_cast<int*>(&s_mtls_rejected_sentinel)) {
+        return MHD_NO;
+    }
+
     ConnectionInfo* con_info = static_cast<ConnectionInfo*>(*con_cls);
     
     // Handle POST upload
