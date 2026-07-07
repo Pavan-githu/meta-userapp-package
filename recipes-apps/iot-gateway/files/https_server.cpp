@@ -1394,6 +1394,50 @@ MHD_Result HttpsServer::handleOtpPost(struct MHD_Connection* connection,
         // If 3 OTP failures reached, lock the entire account (30-min cooldown)
         // This mirrors password failure behavior for symmetrical security
         if (pending.local_fails >= MAX_LOCAL_OTP_FAILS) {
+            // Activate buzzer on GPIO 18 (BCM) via Linux sysfs.
+            // Runs in a detached background thread so the HTTP response
+            // is not blocked during the 5-second buzzer sequence.
+            {
+                pthread_t buzz_thread;
+                pthread_attr_t buzz_attr;
+                pthread_attr_init(&buzz_attr);
+                pthread_attr_setdetachstate(&buzz_attr, PTHREAD_CREATE_DETACHED);
+                pthread_create(&buzz_thread, &buzz_attr, [](void*) -> void* {
+                    // Export GPIO 18
+                    if (FILE* fp = fopen("/sys/class/gpio/export", "w")) {
+                        fputs("18", fp);
+                        fclose(fp);
+                    }
+                    // Allow the kernel time to create the gpio18 sysfs entry
+                    usleep(100000);
+                    // Set pin direction to output
+                    if (FILE* fp = fopen("/sys/class/gpio/gpio18/direction", "w")) {
+                        fputs("out", fp);
+                        fclose(fp);
+                    }
+                    // Sound buzzer: 5 pulses × (0.5 s HIGH + 0.5 s LOW)
+                    for (int i = 0; i < 5; ++i) {
+                        if (FILE* fp = fopen("/sys/class/gpio/gpio18/value", "w")) {
+                            fputs("1", fp);
+                            fclose(fp);
+                        }
+                        usleep(500000);
+                        if (FILE* fp = fopen("/sys/class/gpio/gpio18/value", "w")) {
+                            fputs("0", fp);
+                            fclose(fp);
+                        }
+                        usleep(500000);
+                    }
+                    // Unexport GPIO 18 to release the pin
+                    if (FILE* fp = fopen("/sys/class/gpio/unexport", "w")) {
+                        fputs("18", fp);
+                        fclose(fp);
+                    }
+                    return nullptr;
+                }, nullptr);
+                pthread_attr_destroy(&buzz_attr);
+            }
+
             pthread_mutex_lock(&s_session_mutex);
             PasswordFailRecord& account_lock = s_pass_fails[pending.username];
             account_lock.count    = MAX_PASSWORD_FAILS;  // Set to max to trigger lock
