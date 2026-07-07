@@ -82,6 +82,43 @@ void* ledBlinkThread(void* arg) {
     pthread_exit(NULL);
 }
 
+// Thread function for startup buzzer alert on GPIO 18 (BCM) via Linux sysfs.
+// Fires once at boot to indicate the gateway is initialising.
+void* buzzerStartupThread(void* arg) {
+    // Export GPIO 18
+    if (FILE* fp = fopen("/sys/class/gpio/export", "w")) {
+        fputs("18", fp);
+        fclose(fp);
+    }
+    // Allow kernel time to create the gpio18 sysfs entry
+    usleep(100000);
+    // Set pin direction to output
+    if (FILE* fp = fopen("/sys/class/gpio/gpio18/direction", "w")) {
+        fputs("out", fp);
+        fclose(fp);
+    }
+    // 3 short startup pulses: 0.2 s HIGH + 0.2 s LOW
+    for (int i = 0; i < 3; ++i) {
+        if (FILE* fp = fopen("/sys/class/gpio/gpio18/value", "w")) {
+            fputs("1", fp);
+            fclose(fp);
+        }
+        usleep(200000);
+        if (FILE* fp = fopen("/sys/class/gpio/gpio18/value", "w")) {
+            fputs("0", fp);
+            fclose(fp);
+        }
+        usleep(200000);
+    }
+    // Unexport GPIO 18 to release the pin
+    if (FILE* fp = fopen("/sys/class/gpio/unexport", "w")) {
+        fputs("18", fp);
+        fclose(fp);
+    }
+    std::cout << "[Buzzer] Startup alert complete" << std::endl;
+    pthread_exit(NULL);
+}
+
 // Thread function for WiFi management
 void* wifiManagerThread(void* arg) {
     std::cout << "[WiFi Thread] Started" << std::endl;
@@ -548,6 +585,20 @@ int main(int argc, char** argv) {
         return 1;
     }
     std::cout << "[pthread] LED thread created" << std::endl;
+
+    // Create startup buzzer thread — fires once at boot, then exits naturally.
+    // Runs detached so it does not need to be joined.
+    {
+        pthread_t buzz_thread;
+        pthread_attr_t buzz_attr;
+        pthread_attr_init(&buzz_attr);
+        pthread_attr_setdetachstate(&buzz_attr, PTHREAD_CREATE_DETACHED);
+        if (pthread_create(&buzz_thread, &buzz_attr, buzzerStartupThread, NULL) != 0)
+            std::cerr << "Failed to create startup buzzer thread" << std::endl;
+        else
+            std::cout << "[pthread] Startup buzzer thread created" << std::endl;
+        pthread_attr_destroy(&buzz_attr);
+    }
     
     // Create certificate management thread
     if (pthread_create(&cert_thread, NULL, certificateManagementThread, NULL) != 0) {
