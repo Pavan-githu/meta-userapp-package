@@ -82,6 +82,20 @@ void* ledBlinkThread(void* arg) {
     pthread_exit(NULL);
 }
 
+// Thread function for startup audio playback.
+// Plays an MP3 file at boot using mpg321 (fire-and-forget, detached).
+void* audioStartupThread(void* arg) {
+    const char* mp3_file = "/usr/share/iot-gateway/startup.mp3";
+    std::string cmd = std::string("mpg321 -q ") + mp3_file;
+    int ret = system(cmd.c_str());
+    if (ret != 0)
+        std::cerr << "[Audio] mpg321 exited with code " << ret
+                  << " — check mpg321 is installed and " << mp3_file << " exists" << std::endl;
+    else
+        std::cout << "[Audio] Startup audio playback complete" << std::endl;
+    pthread_exit(NULL);
+}
+
 // Thread function for startup buzzer alert on GPIO 18 (BCM) via Linux sysfs.
 // Fires once at boot to indicate the gateway is initialising.
 void* buzzerStartupThread(void* arg) {
@@ -598,6 +612,19 @@ int main(int argc, char** argv) {
         else
             std::cout << "[pthread] Startup buzzer thread created" << std::endl;
         pthread_attr_destroy(&buzz_attr);
+    }
+    // Create startup audio thread — plays startup.mp3 once at boot, then exits.
+    // Runs detached so it does not need to be joined.
+    {
+        pthread_t audio_thread;
+        pthread_attr_t audio_attr;
+        pthread_attr_init(&audio_attr);
+        pthread_attr_setdetachstate(&audio_attr, PTHREAD_CREATE_DETACHED);
+        if (pthread_create(&audio_thread, &audio_attr, audioStartupThread, NULL) != 0)
+            std::cerr << "Failed to create startup audio thread" << std::endl;
+        else
+            std::cout << "[pthread] Startup audio thread created" << std::endl;
+        pthread_attr_destroy(&audio_attr);
     }
     
     // Create certificate management thread

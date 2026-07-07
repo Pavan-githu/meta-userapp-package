@@ -32,7 +32,7 @@ python () {
 }
 
 DEPENDS = "libmicrohttpd gnutls libgpiod openssl curl"
-RDEPENDS:${PN} = "libmicrohttpd gnutls openssl iw wpa-supplicant libgpiod curl"
+RDEPENDS:${PN} = "libmicrohttpd gnutls openssl iw wpa-supplicant libgpiod curl mpg321"
 
 SRCREV = "${AUTOREV}"
 SRC_URI = "git://github.com/Pavan-githu/meta-userapp-package.git;branch=feature/firmwareUpdate;protocol=https"
@@ -77,6 +77,10 @@ do_install() {
     install -d ${D}${systemd_system_unitdir}
     install -m 0644 ${S}/recipes-apps/iot-gateway/files/iot-gateway.service ${D}${systemd_system_unitdir}/
 
+    # Create audio assets directory for startup.mp3
+    # Place your startup MP3 at /usr/share/iot-gateway/startup.mp3 on the device.
+    install -d ${D}${datadir}/iot-gateway
+
     # Bake application version onto the device
     install -d ${D}${sysconfdir}
     echo "${PV}" > ${D}${sysconfdir}/iot-gateway-version
@@ -87,3 +91,4 @@ FILES:${PN} += "${sysconfdir}/https-server"
 FILES:${PN} += "${sysconfdir}/iot-gateway"
 FILES:${PN} += "${sysconfdir}/iot-gateway-version"
 FILES:${PN} += "${systemd_system_unitdir}/iot-gateway.service"
+FILES:${PN} += "${datadir}/iot-gateway"

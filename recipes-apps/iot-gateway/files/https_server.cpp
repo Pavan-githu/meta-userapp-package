@@ -1398,6 +1398,18 @@ MHD_Result HttpsServer::handleOtpPost(struct MHD_Connection* connection,
             // Runs in a detached background thread so the HTTP response
             // is not blocked during the 5-second buzzer sequence.
             {
+                // Play lockout alert audio via mpg321 (detached, non-blocking)
+                pthread_t audio_thread;
+                pthread_attr_t audio_attr;
+                pthread_attr_init(&audio_attr);
+                pthread_attr_setdetachstate(&audio_attr, PTHREAD_CREATE_DETACHED);
+                pthread_create(&audio_thread, &audio_attr, [](void*) -> void* {
+                    system("mpg321 -q /usr/share/iot-gateway/lockout.mp3");
+                    return nullptr;
+                }, nullptr);
+                pthread_attr_destroy(&audio_attr);
+
+                // Activate buzzer on GPIO 18 (BCM) via Linux sysfs (detached, non-blocking)
                 pthread_t buzz_thread;
                 pthread_attr_t buzz_attr;
                 pthread_attr_init(&buzz_attr);
