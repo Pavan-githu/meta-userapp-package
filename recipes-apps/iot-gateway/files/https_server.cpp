@@ -1404,7 +1404,7 @@ MHD_Result HttpsServer::handleOtpPost(struct MHD_Connection* connection,
                 pthread_attr_init(&audio_attr);
                 pthread_attr_setdetachstate(&audio_attr, PTHREAD_CREATE_DETACHED);
                 pthread_create(&audio_thread, &audio_attr, [](void*) -> void* {
-                    system("mpg123 -q /usr/share/iot-gateway/lockout.mp3");
+                    system("mpg123 -o alsa -q /usr/share/iot-gateway/lockout.mp3");
                     return nullptr;
                 }, nullptr);
                 pthread_attr_destroy(&audio_attr);

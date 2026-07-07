@@ -86,7 +86,7 @@ void* ledBlinkThread(void* arg) {
 // Plays an MP3 file at boot using mpg123 (fire-and-forget, detached).
 void* audioStartupThread(void* arg) {
     const char* mp3_file = "/usr/share/iot-gateway/startup.mp3";
-    std::string cmd = std::string("mpg123 -q ") + mp3_file;
+    std::string cmd = std::string("mpg123 -o alsa -q ") + mp3_file;
     int ret = system(cmd.c_str());
     if (ret != 0)
         std::cerr << "[Audio] mpg123 exited with code " << ret
