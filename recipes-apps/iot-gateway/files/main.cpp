@@ -83,14 +83,14 @@ void* ledBlinkThread(void* arg) {
 }
 
 // Thread function for startup audio playback.
-// Plays an MP3 file at boot using mpg321 (fire-and-forget, detached).
+// Plays an MP3 file at boot using mpg123 (fire-and-forget, detached).
 void* audioStartupThread(void* arg) {
     const char* mp3_file = "/usr/share/iot-gateway/startup.mp3";
-    std::string cmd = std::string("mpg321 -q ") + mp3_file;
+    std::string cmd = std::string("mpg123 -q ") + mp3_file;
     int ret = system(cmd.c_str());
     if (ret != 0)
-        std::cerr << "[Audio] mpg321 exited with code " << ret
-                  << " — check mpg321 is installed and " << mp3_file << " exists" << std::endl;
+        std::cerr << "[Audio] mpg123 exited with code " << ret
+                  << " — check mpg123 is installed and " << mp3_file << " exists" << std::endl;
     else
         std::cout << "[Audio] Startup audio playback complete" << std::endl;
     pthread_exit(NULL);
