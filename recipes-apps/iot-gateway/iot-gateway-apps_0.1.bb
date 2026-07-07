@@ -32,7 +32,7 @@ python () {
 }
 
 DEPENDS = "libmicrohttpd gnutls libgpiod openssl curl"
-RDEPENDS:${PN} = "libmicrohttpd gnutls openssl iw wpa-supplicant libgpiod curl mpg123 alsa-lib alsa-utils"
+RDEPENDS:${PN} = "libmicrohttpd gnutls openssl iw wpa-supplicant libgpiod curl mpg123 mpg123-plugins alsa-lib alsa-utils"
 
 SRCREV = "${AUTOREV}"
 SRC_URI = "git://github.com/Pavan-githu/meta-userapp-package.git;branch=feature/firmwareUpdate;protocol=https"
