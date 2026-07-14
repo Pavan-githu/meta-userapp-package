@@ -63,6 +63,30 @@ struct FirmwareUpdateConfig {
 };
 
 // ---------------------------------------------------------------------------
+// FirmwareHeader – binary header at byte offset 0 of every .ldr firmware image
+//
+// File layout:  [ FirmwareHeader (116 bytes) ][ payload (payload_size bytes) ]
+//
+// hdr_crc32  covers bytes 0–111 (all header fields except hdr_crc32 itself).
+// sha256     is the raw 32-byte SHA-256 digest of the payload region only.
+// ---------------------------------------------------------------------------
+
+static constexpr uint8_t  LDR_MAGIC[4]    = {'R', 'P', 'I', 'F'};
+static constexpr uint16_t LDR_HDR_VERSION = 1;
+static constexpr uint16_t LDR_HDR_SIZE    = 116;  // sizeof(FirmwareHeader)
+
+typedef struct __attribute__((packed)) {
+    uint8_t  magic[4];        /* "RPIF"                              */
+    uint16_t hdr_version;     /* must be 1                           */
+    uint16_t hdr_size;        /* must be 116                         */
+    char     fw_version[32];  /* e.g. "v0.1.0\0..."                  */
+    char     timestamp[32];   /* e.g. "2026-06-29T16:36:52Z\0..."    */
+    uint8_t  sha256[32];      /* raw SHA-256 digest of payload       */
+    uint64_t payload_size;    /* byte count of the payload region    */
+    uint32_t hdr_crc32;       /* CRC32/ISO-HDLC of header[0..111]   */
+} FirmwareHeader;
+
+// ---------------------------------------------------------------------------
 // FirmwareUpdateManager
 // ---------------------------------------------------------------------------
 class FirmwareUpdateManager {
@@ -124,6 +148,24 @@ public:
     // -----------------------------------------------------------------------
     static int compareSemver(const std::string& a, const std::string& b);
 
+    // -----------------------------------------------------------------------
+    // Verify the 116-byte header of a .ldr firmware image.
+    //
+    // Checks performed:
+    //   1. magic bytes == "RPIF"
+    //   2. hdr_version == 1
+    //   3. hdr_size    == 116
+    //   4. CRC32/ISO-HDLC of header[0..111] matches hdr_crc32
+    //   5. fw_version and timestamp fields are null-terminated
+    //   6. payload_size is consistent with the actual file size
+    //
+    // Returns true and populates header_out on success.
+    // Returns false and populates error_out with a human-readable reason.
+    // -----------------------------------------------------------------------
+    static bool verifyLdrHeader(const std::string& ldr_path,
+                                FirmwareHeader&    header_out,
+                                std::string&       error_out);
+
 private:
     // Background thread entry point
     static void* updateThreadEntry(void* arg);
@@ -140,6 +182,7 @@ private:
     // Internal helpers
     void setError(const std::string& msg);
     bool isHttpsUrl(const std::string& url) const;
+    static bool isLdrFile(const std::string& path);
 
     // -----------------------------------------------------------------------
     // Member state
@@ -159,6 +202,10 @@ private:
 
     // A copy of the config used by the background thread
     FirmwareUpdateConfig      m_active_config;
+
+    // .ldr image state – populated during verifyLdrHeader
+    FirmwareHeader            m_ldr_header;     // parsed header of current .ldr update
+    bool                      m_is_ldr_update;  // true when staged firmware is .ldr format
 };
 
 #endif // FIRMWAREUPDATE_H

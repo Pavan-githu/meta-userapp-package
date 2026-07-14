@@ -15,6 +15,34 @@
 #include <openssl/err.h>
 
 // ---------------------------------------------------------------------------
+// crc32Compute  –  CRC-32/ISO-HDLC (poly 0xEDB88320, init 0xFFFFFFFF,
+//                  final XOR 0xFFFFFFFF).  Compatible with zlib crc32(),
+//                  zip, and Ethernet FCS.
+//
+// The lookup table is built on first call; C++11 guarantees the static
+// local is initialised exactly once even in a multithreaded environment.
+// ---------------------------------------------------------------------------
+static uint32_t crc32Compute(const uint8_t* data, size_t len)
+{
+    struct Table {
+        uint32_t t[256];
+        Table() {
+            for (uint32_t i = 0; i < 256; ++i) {
+                uint32_t c = i;
+                for (int k = 0; k < 8; ++k)
+                    c = (c & 1u) ? (0xEDB88320u ^ (c >> 1)) : (c >> 1);
+                t[i] = c;
+            }
+        }
+    };
+    static const Table tbl;
+    uint32_t crc = 0xFFFFFFFFu;
+    for (size_t i = 0; i < len; ++i)
+        crc = tbl.t[(crc ^ data[i]) & 0xFFu] ^ (crc >> 8);
+    return crc ^ 0xFFFFFFFFu;
+}
+
+// ---------------------------------------------------------------------------
 // firmwareStatusLabel
 // ---------------------------------------------------------------------------
 const char* firmwareStatusLabel(FirmwareUpdateStatus s)
@@ -31,6 +59,126 @@ const char* firmwareStatusLabel(FirmwareUpdateStatus s)
 }
 
 // ---------------------------------------------------------------------------
+// verifyLdrHeader  –  validate the 116-byte header of a .ldr firmware image
+// ---------------------------------------------------------------------------
+bool FirmwareUpdateManager::verifyLdrHeader(const std::string& ldr_path,
+                                             FirmwareHeader&    header_out,
+                                             std::string&       error_out)
+{
+    // Open file and determine size
+    std::ifstream ifs(ldr_path, std::ios::binary | std::ios::ate);
+    if (!ifs.is_open()) {
+        error_out = "Cannot open firmware file: " + ldr_path;
+        return false;
+    }
+    const std::streamoff file_size = ifs.tellg();
+    ifs.seekg(0, std::ios::beg);
+
+    // File must be at least as large as the header
+    if (file_size < static_cast<std::streamoff>(LDR_HDR_SIZE)) {
+        error_out = "File too small to contain a valid .ldr header ("
+                    + std::to_string(static_cast<long long>(file_size)) + " bytes)";
+        return false;
+    }
+
+    // Read header bytes
+    FirmwareHeader hdr;
+    if (!ifs.read(reinterpret_cast<char*>(&hdr), sizeof(hdr))) {
+        error_out = "Failed to read firmware header from: " + ldr_path;
+        return false;
+    }
+    ifs.close();
+
+    // ── 1. Magic bytes ────────────────────────────────────────────────────
+    if (std::memcmp(hdr.magic, LDR_MAGIC, sizeof(LDR_MAGIC)) != 0) {
+        error_out = std::string("Invalid magic bytes: expected 'RPIF', got '")
+                    + static_cast<char>(hdr.magic[0])
+                    + static_cast<char>(hdr.magic[1])
+                    + static_cast<char>(hdr.magic[2])
+                    + static_cast<char>(hdr.magic[3]) + "'";
+        return false;
+    }
+
+    // ── 2. Header version ─────────────────────────────────────────────────
+    if (hdr.hdr_version != LDR_HDR_VERSION) {
+        error_out = "Unsupported header version: "
+                    + std::to_string(hdr.hdr_version)
+                    + " (expected " + std::to_string(LDR_HDR_VERSION) + ")";
+        return false;
+    }
+
+    // ── 3. Header size field ──────────────────────────────────────────────
+    if (hdr.hdr_size != LDR_HDR_SIZE) {
+        error_out = "Unexpected hdr_size field: "
+                    + std::to_string(hdr.hdr_size)
+                    + " (expected " + std::to_string(LDR_HDR_SIZE) + ")";
+        return false;
+    }
+
+    // ── 4. CRC32 of header bytes 0..111 ───────────────────────────────────
+    //  hdr_crc32 sits at offset 112 (LDR_HDR_SIZE - sizeof(uint32_t));
+    //  it is NOT included in the digest.
+    const size_t   covered_len = LDR_HDR_SIZE - sizeof(uint32_t); // 112
+    const uint32_t computed    = crc32Compute(
+                                     reinterpret_cast<const uint8_t*>(&hdr),
+                                     covered_len);
+    if (computed != hdr.hdr_crc32) {
+        std::ostringstream oss;
+        oss << std::hex << std::uppercase
+            << "Header CRC32 mismatch: computed 0x" << computed
+            << ", stored 0x" << hdr.hdr_crc32;
+        error_out = oss.str();
+        return false;
+    }
+
+    // ── 5. fw_version null-termination ────────────────────────────────────
+    bool fw_ver_ok = false;
+    for (int i = 0; i < 32; ++i)
+        if (hdr.fw_version[i] == '\0') { fw_ver_ok = true; break; }
+    if (!fw_ver_ok) {
+        error_out = "fw_version field is not null-terminated within 32 bytes";
+        return false;
+    }
+
+    // ── 6. timestamp null-termination ─────────────────────────────────────
+    bool ts_ok = false;
+    for (int i = 0; i < 32; ++i)
+        if (hdr.timestamp[i] == '\0') { ts_ok = true; break; }
+    if (!ts_ok) {
+        error_out = "timestamp field is not null-terminated within 32 bytes";
+        return false;
+    }
+
+    // ── 7. payload_size consistent with actual file size ──────────────────
+    const uint64_t expected_total =
+        static_cast<uint64_t>(LDR_HDR_SIZE) + hdr.payload_size;
+    if (static_cast<uint64_t>(file_size) != expected_total) {
+        error_out = "File size mismatch: header declares payload of "
+                    + std::to_string(hdr.payload_size)
+                    + " bytes (total " + std::to_string(expected_total)
+                    + "), but actual file is "
+                    + std::to_string(static_cast<uint64_t>(file_size)) + " bytes";
+        return false;
+    }
+
+    header_out = hdr;
+    std::cout << "[FirmwareUpdate] .ldr header valid:"
+              << " fw_version=" << hdr.fw_version
+              << " timestamp="  << hdr.timestamp
+              << " payload="    << hdr.payload_size << " bytes" << std::endl;
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// isLdrFile  –  true when path ends with ".ldr" (case-sensitive)
+// ---------------------------------------------------------------------------
+bool FirmwareUpdateManager::isLdrFile(const std::string& path)
+{
+    return path.size() > 4 &&
+           path.compare(path.size() - 4, 4, ".ldr") == 0;
+}
+
+// ---------------------------------------------------------------------------
 // Constructor / Destructor
 // ---------------------------------------------------------------------------
 FirmwareUpdateManager::FirmwareUpdateManager(const std::string& current_binary_path,
@@ -39,6 +187,7 @@ FirmwareUpdateManager::FirmwareUpdateManager(const std::string& current_binary_p
     , m_current_version(current_version)
     , m_thread_running(false)
     , m_cancel_requested(false)
+    , m_is_ldr_update(false)
     , m_status(FirmwareUpdateStatus::IDLE)
 {
     pthread_mutex_init(&m_mutex, nullptr);
@@ -124,7 +273,8 @@ bool FirmwareUpdateManager::startUpdate(const FirmwareUpdateConfig& config)
 void* FirmwareUpdateManager::updateThreadEntry(void* arg)
 {
     FirmwareUpdateManager* self = static_cast<FirmwareUpdateManager*>(arg);
-    const FirmwareUpdateConfig& cfg = self->m_active_config;
+    FirmwareUpdateConfig cfg = self->m_active_config; // mutable copy – updated for .ldr
+    self->m_is_ldr_update = false;
 
     auto fail = [&](const std::string& msg) {
         self->setError(msg);
@@ -142,6 +292,26 @@ void* FirmwareUpdateManager::updateThreadEntry(void* arg)
 
     if (self->m_cancel_requested.load()) {
         fail("Update cancelled by caller");
+    }
+
+    // Step 1b: For .ldr firmware images, validate the binary header.
+    //          The authoritative payload SHA-256 is read from the header
+    //          and replaces any externally supplied expected_sha256.
+    if (self->isLdrFile(cfg.staging_path)) {
+        FirmwareHeader hdr;
+        std::string    hdr_err;
+        if (!FirmwareUpdateManager::verifyLdrHeader(cfg.staging_path, hdr, hdr_err))
+            fail(std::string("LDR header validation failed: ") + hdr_err);
+        self->m_ldr_header    = hdr;
+        self->m_is_ldr_update = true;
+        // Convert raw 32-byte digest to lowercase hex for verifySha256
+        std::ostringstream hex;
+        hex << std::hex;
+        for (int i = 0; i < 32; ++i) {
+            hex.width(2); hex.fill('0');
+            hex << static_cast<unsigned int>(hdr.sha256[i]);
+        }
+        cfg.expected_sha256 = hex.str();
     }
 
     // Step 2: Verify
@@ -237,6 +407,15 @@ bool FirmwareUpdateManager::verifySha256(const FirmwareUpdateConfig& cfg)
         return false;
     }
 
+    // For .ldr images the SHA-256 covers only the payload (bytes LDR_HDR_SIZE..end)
+    if (m_is_ldr_update) {
+        ifs.seekg(LDR_HDR_SIZE, std::ios::beg);
+        if (!ifs) {
+            setError("Failed to seek past .ldr header in: " + cfg.staging_path);
+            return false;
+        }
+    }
+
     // Compute digest incrementally
     EVP_MD_CTX* ctx = EVP_MD_CTX_new();
     if (!ctx) {
@@ -300,6 +479,30 @@ bool FirmwareUpdateManager::verifySha256(const FirmwareUpdateConfig& cfg)
 bool FirmwareUpdateManager::applyUpdate(const FirmwareUpdateConfig& cfg)
 {
     std::cout << "[FirmwareUpdate] Applying update to " << cfg.target_path << std::endl;
+
+    // For .ldr images, extract the payload (strip the 116-byte header) into a
+    // raw binary at staging_path + ".raw", then replace the staging file.
+    // This ensures only the executable payload is installed, not the header.
+    if (m_is_ldr_update) {
+        const std::string raw_path = cfg.staging_path + ".raw";
+        {
+            std::ifstream src(cfg.staging_path, std::ios::binary);
+            std::ofstream dst(raw_path, std::ios::binary | std::ios::trunc);
+            if (!src || !dst) {
+                setError("Cannot extract .ldr payload to: " + raw_path);
+                return false;
+            }
+            src.seekg(LDR_HDR_SIZE, std::ios::beg);
+            dst << src.rdbuf();
+        }
+        std::remove(cfg.staging_path.c_str());
+        if (std::rename(raw_path.c_str(), cfg.staging_path.c_str()) != 0) {
+            setError(std::string("Failed to stage .ldr payload: ") + strerror(errno));
+            return false;
+        }
+        std::cout << "[FirmwareUpdate] .ldr payload extracted ("
+                  << m_ldr_header.payload_size << " bytes)" << std::endl;
+    }
 
     // Backup existing binary if it exists
     if (!cfg.backup_path.empty()) {
