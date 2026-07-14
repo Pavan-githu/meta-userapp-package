@@ -54,11 +54,13 @@ do_compile() {
     ${CXX} ${CXXFLAGS} -std=c++11 -pthread -c https_server.cpp -o https_server.o
     ${CXX} ${CXXFLAGS} -std=c++11 -pthread -c certificate.cpp  -o certificate.o
     ${CXX} ${CXXFLAGS} -std=c++11 -pthread -c wifi_manager.cpp -o wifi_manager.o
-    ${CXX} ${CXXFLAGS} -std=c++11 -pthread -c user_auth.cpp    -o user_auth.o
-    ${CXX} ${CXXFLAGS} -std=c++11 -pthread -c main.cpp         -o main.o
+    ${CXX} ${CXXFLAGS} -std=c++11 -pthread -c user_auth.cpp        -o user_auth.o
+    ${CXX} ${CXXFLAGS} -std=c++11 -pthread -c firmwareupdate.cpp   -o firmwareupdate.o
+    ${CXX} ${CXXFLAGS} -std=c++11 -pthread -c main.cpp             -o main.o
     ${CXX} ${CXXFLAGS} -pthread -o iot-gateway \
         main.o blink.o https_server.o certificate.o wifi_manager.o \
         user_auth.o keccak256.o otp_manager.o blockchain_logger.o \
+        firmwareupdate.o \
         ${LDFLAGS} -lmicrohttpd -lgnutls -lgpiod -lssl -lcrypto -lcurl
 }
 

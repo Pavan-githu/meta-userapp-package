@@ -3,6 +3,7 @@
 #include "wifi_manager.h"
 #include "user_auth.h"
 #include "blockchain_logger.h"
+#include "firmwareupdate.h"
 #include <iostream>
 #include <fstream>
 #include <pthread.h>
@@ -17,6 +18,7 @@
 // Global variables for cleanup
 GPIO* led_gpio = nullptr;
 HttpsServer* server = nullptr;
+FirmwareUpdateManager* fw_manager = nullptr;
 std::atomic<bool> running(true);
 std::atomic<bool> pause_led(false);  // Control LED blinking during user input
 std::atomic<int> led_blink_speed(5);  // LED blink interval in seconds (default: 5)
@@ -38,7 +40,11 @@ void signalHandler(int signum) {
     if (server) {
         server->stop();
     }
-    
+
+    if (fw_manager) {
+        fw_manager->cancel();
+    }
+
     if (led_gpio) {
         led_gpio->cleanup();
     }
@@ -446,6 +452,99 @@ void* certificateManagementThread(void* arg) {
     pthread_exit(NULL);
 }
 
+// Thread function for firmware OTA update management
+//
+// Reads /etc/iot-gateway/firmware.conf on startup and then polls every
+// CHECK_INTERVAL_S seconds.  If the conf file specifies a newer version
+// the update is downloaded, verified, and applied atomically.
+//
+// firmware.conf format (one key=value per line, # comments allowed):
+//   FIRMWARE_URL=https://example.com/iot-gateway-1.2.3.bin
+//   FIRMWARE_VERSION=1.2.3
+//   FIRMWARE_SHA256=<64-char hex digest>
+//   FIRMWARE_CA_CERT=/etc/ssl/certs/ca-certificates.crt
+//   FIRMWARE_TARGET=/usr/bin/iot-gateway
+//   FIRMWARE_STAGING=/tmp/iot-gateway.staging
+//   FIRMWARE_BACKUP=/usr/bin/iot-gateway.bak
+//   FIRMWARE_CHECK_INTERVAL=3600
+void* firmwareUpdateThread(void* arg) {
+    std::cout << "[FirmwareUpdate Thread] Started" << std::endl;
+
+    // Read current version from /etc/iot-gateway-version (written by do_install)
+    std::string current_version = "0.0.0";
+    {
+        std::ifstream vf("/etc/iot-gateway-version");
+        if (vf.is_open()) std::getline(vf, current_version);
+        while (!current_version.empty() &&
+               (current_version.back() == '\n' || current_version.back() == '\r' ||
+                current_version.back() == ' '))
+            current_version.pop_back();
+    }
+
+    FirmwareUpdateManager mgr("/usr/bin/iot-gateway", current_version);
+    fw_manager = &mgr;
+
+    unsigned int check_interval = 3600; // default: check once per hour
+
+    while (running) {
+        // Re-read config on every cycle (allows runtime reconfiguration)
+        FirmwareUpdateConfig cfg;
+        cfg.ca_cert_path = "/etc/ssl/certs/ca-certificates.crt";
+        cfg.target_path  = "/usr/bin/iot-gateway";
+        cfg.staging_path = "/tmp/iot-gateway.staging";
+        cfg.backup_path  = "/usr/bin/iot-gateway.bak";
+
+        std::ifstream conf("/etc/iot-gateway/firmware.conf");
+        if (conf.is_open()) {
+            std::string line;
+            while (std::getline(conf, line)) {
+                if (line.empty() || line[0] == '#') continue;
+                auto eq = line.find('=');
+                if (eq == std::string::npos) continue;
+                std::string key = line.substr(0, eq);
+                std::string val = line.substr(eq + 1);
+                while (!val.empty() &&
+                       (val.back() == ' ' || val.back() == '\r' || val.back() == '\t'))
+                    val.pop_back();
+                if      (key == "FIRMWARE_URL")             cfg.url             = val;
+                else if (key == "FIRMWARE_VERSION")         cfg.version         = val;
+                else if (key == "FIRMWARE_SHA256")          cfg.expected_sha256 = val;
+                else if (key == "FIRMWARE_CA_CERT")         cfg.ca_cert_path    = val;
+                else if (key == "FIRMWARE_TARGET")          cfg.target_path     = val;
+                else if (key == "FIRMWARE_STAGING")         cfg.staging_path    = val;
+                else if (key == "FIRMWARE_BACKUP")          cfg.backup_path     = val;
+                else if (key == "FIRMWARE_CHECK_INTERVAL")  check_interval      = static_cast<unsigned int>(std::stoul(val));
+            }
+        } else {
+            std::cout << "[FirmwareUpdate] /etc/iot-gateway/firmware.conf not found — "
+                         "OTA updates disabled" << std::endl;
+            // Sleep and check again in case conf appears later
+            for (unsigned int i = 0; i < check_interval && running; ++i) sleep(1);
+            continue;
+        }
+
+        // Attempt update only when all required fields are present
+        if (!cfg.url.empty() && !cfg.version.empty() && !cfg.expected_sha256.empty()) {
+            FirmwareUpdateStatus cur = mgr.getStatus();
+            if (cur == FirmwareUpdateStatus::IDLE ||
+                cur == FirmwareUpdateStatus::SUCCESS ||
+                cur == FirmwareUpdateStatus::FAILED) {
+                std::cout << "[FirmwareUpdate] Checking for update: remote version "
+                          << cfg.version << ", local version "
+                          << mgr.getCurrentVersion() << std::endl;
+                mgr.startUpdate(cfg); // no-op if already up-to-date or downgrade
+            }
+        }
+
+        // Wait for the check interval, waking early if shutdown is requested
+        for (unsigned int i = 0; i < check_interval && running; ++i) sleep(1);
+    }
+
+    fw_manager = nullptr;
+    std::cout << "[FirmwareUpdate Thread] Stopped" << std::endl;
+    pthread_exit(NULL);
+}
+
 // Thread function for HTTPS server
 void* httpsServerThread(void* arg) {
     std::cout << "[HTTPS Thread] Started" << std::endl;
@@ -591,7 +690,7 @@ int main(int argc, char** argv) {
     // Launch all service threads using pthread
     std::cout << "\n--- Starting Service Threads (pthread) ---" << std::endl;
     
-    pthread_t led_thread, cert_thread, wifi_thread, https_thread;
+    pthread_t led_thread, cert_thread, wifi_thread, https_thread, fw_thread;
     
     // Create LED blink thread (independent of other services)
     if (pthread_create(&led_thread, NULL, ledBlinkThread, NULL) != 0) {
@@ -647,6 +746,13 @@ int main(int argc, char** argv) {
         return 1;
     }
     std::cout << "[pthread] HTTPS thread created" << std::endl;
+
+    // Create firmware OTA update thread
+    if (pthread_create(&fw_thread, NULL, firmwareUpdateThread, NULL) != 0) {
+        std::cerr << "Failed to create firmware update thread" << std::endl;
+        return 1;
+    }
+    std::cout << "[pthread] Firmware update thread created" << std::endl;
     
     std::cout << "\n==================================================" << std::endl;
     std::cout << "  All services running in separate threads!" << std::endl;
@@ -655,6 +761,7 @@ int main(int argc, char** argv) {
     std::cout << "  - WiFi: Manager running" << std::endl;
     std::cout << "  - HTTPS: Server on port 8443 (waiting for certificates)" << std::endl;
     std::cout << "    * Upload: https://localhost:8443/upload" << std::endl;
+    std::cout << "  - Firmware OTA: Monitoring /etc/iot-gateway/firmware.conf" << std::endl;
     std::cout << "  Press Ctrl+C to stop all services" << std::endl;
     std::cout << "==================================================" << std::endl;
     
@@ -663,6 +770,7 @@ int main(int argc, char** argv) {
     pthread_join(cert_thread, NULL);
     pthread_join(wifi_thread, NULL);
     pthread_join(https_thread, NULL);
+    pthread_join(fw_thread, NULL);
     
     std::cout << "\n=== IoT Gateway Application Stopped ===" << std::endl;
     return 0;

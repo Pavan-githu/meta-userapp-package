@@ -3,6 +3,7 @@
 
 #include "blink.h"
 #include "https_server.h"
+#include "firmwareupdate.h"
 #include <atomic>
 #include <pthread.h>
 
@@ -18,6 +19,7 @@ struct HttpsThreadArgs {
 // Global variables for cleanup
 extern GPIO* led_gpio;
 extern HttpsServer* server;
+extern FirmwareUpdateManager* fw_manager;
 extern std::atomic<bool> running;
 extern std::atomic<bool> pause_led;
 extern std::atomic<int> led_blink_speed;
@@ -39,5 +41,6 @@ void* ledBlinkThread(void* arg);
 void* wifiManagerThread(void* arg);
 void* httpsServerThread(void* arg);
 void* certificateManagementThread(void* arg);
+void* firmwareUpdateThread(void* arg);
 
 #endif // MAIN_H
