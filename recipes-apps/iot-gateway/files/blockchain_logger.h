@@ -60,6 +60,24 @@
 #include <deque>
 #include <pthread.h>
 
+// ---------------------------------------------------------------------------
+// FirmwareInfo — mirrors FirmwareMetadataStore.FirmwareMetadata in Solidity.
+// Populated by readFirmwareMetadata() / readLatestFirmwareMetadata().
+// ---------------------------------------------------------------------------
+struct FirmwareInfo {
+    std::string firmware_hash;          // "sha256:<hex>"
+    std::string firmware_version;       // "v0.1.0"
+    std::string timestamp;              // "2026-06-29T16:36:52Z"
+    std::string signer_identity;        // "TechID:5678"
+    std::string download_url;           // GitHub release URL
+    std::string image_filename;         // .wic.bz2 filename
+    uint64_t    image_size_bytes  = 0;
+    std::string final_image_filename;   // RPIF_*.ldr filename
+    uint64_t    final_image_size_bytes = 0;
+    bool        exists            = false;  // false → version not registered
+    std::string error;                  // non-empty on RPC / decode failure
+};
+
 class BlockchainLogger {
 public:
     // Must match the EventType enum in IoTAuthLog.sol
@@ -153,6 +171,32 @@ public:
     std::string getStatusString() const;
 
     // -----------------------------------------------------------------------
+    // Firmware metadata queries — FirmwareMetadataStore contract
+    // These use eth_call (read-only, no signing, no gas).
+    // -----------------------------------------------------------------------
+
+    /**
+     * Fetch firmware metadata for a specific version from the
+     * FirmwareMetadataStore contract (readFirmwareMetadata).
+     *
+     * @param firmware_contract_addr  Address of the FirmwareMetadataStore
+     *                                contract (may differ from auth contract).
+     * @param version                 Version string, e.g. "v0.1.0"
+     * @return FirmwareInfo — check .exists and .error fields.
+     */
+    FirmwareInfo readFirmwareMetadata(const std::string& firmware_contract_addr,
+                                      const std::string& version) const;
+
+    /**
+     * Fetch the latest registered firmware metadata
+     * (readLatestFirmwareMetadata — no version argument needed).
+     *
+     * @param firmware_contract_addr  Address of the FirmwareMetadataStore contract.
+     * @return FirmwareInfo — check .exists and .error fields.
+     */
+    FirmwareInfo readLatestFirmwareMetadata(const std::string& firmware_contract_addr) const;
+
+    // -----------------------------------------------------------------------
     // Utility
     // -----------------------------------------------------------------------
 
@@ -199,8 +243,10 @@ private:
     mutable pthread_mutex_t mutex_;
 
     // Function selectors (keccak256 of signature, first 4 bytes)
-    std::string sel_logEvent_;    // logEvent(bytes32,uint8,bytes32)
-    std::string sel_isLocked_;    // isLocked(bytes32)
+    std::string sel_logEvent_;              // logEvent(bytes32,uint8,bytes32)
+    std::string sel_isLocked_;              // isLocked(bytes32)
+    std::string sel_readFirmware_;          // readFirmwareMetadata(string)
+    std::string sel_readLatestFirmware_;    // readLatestFirmwareMetadata()
 
     // HTTP JSON-RPC POST using libcurl; returns raw response body or ""
     std::string jsonRPC(const std::string& body) const;
@@ -218,6 +264,29 @@ private:
 
     // Build ABI-encoded call data for isLocked(bytes32)
     std::string abiEncodeIsLocked(const std::string& user_hash_0x) const;
+
+    // Build ABI-encoded call data for readFirmwareMetadata(string)
+    std::string abiEncodeReadFirmware(const std::string& version) const;
+
+    // Build ABI-encoded call data for readLatestFirmwareMetadata()
+    std::string abiEncodeReadLatestFirmware() const;
+
+    // Decode ABI-encoded eth_call response into a FirmwareInfo struct.
+    // result_hex is the "result" hex string from the JSON-RPC response.
+    static FirmwareInfo abiDecodeFirmwareResult(const std::string& result_hex,
+                                                bool has_exists_field);
+
+    // Decode a UTF-8 string from ABI-encoded bytes at byte offset `offset`.
+    // `data` is the raw decoded bytes of the entire return payload.
+    static std::string abiDecodeString(const std::vector<uint8_t>& data,
+                                       size_t offset);
+
+    // Decode a uint256 from 32 bytes at position `offset` in data.
+    static uint64_t abiDecodeUint64(const std::vector<uint8_t>& data,
+                                    size_t offset);
+
+    // Convert a hex string (with or without 0x prefix) to raw bytes.
+    static std::vector<uint8_t> hexToBytes(const std::string& hex);
 
     // Pad hex string to 64 hex chars (32 bytes) by left-padding with zeros
     static std::string leftPad32(const std::string& hex);

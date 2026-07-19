@@ -24,6 +24,7 @@
 #include <iostream>
 #include <cstring>
 #include <cstdio>
+#include <vector>
 #include <unistd.h>   // sleep()
 
 // ---------------------------------------------------------------------------
@@ -59,8 +60,16 @@ BlockchainLogger::BlockchainLogger(const std::string& rpc_url,
     std::string h2 = keccak256_hex("isLocked(bytes32)");
     sel_isLocked_  = "0x" + h2.substr(0, 8);
 
-    std::cout << "[Blockchain] logEvent selector : " << sel_logEvent_ << "\n";
-    std::cout << "[Blockchain] isLocked selector : " << sel_isLocked_ << "\n";
+    std::string h3 = keccak256_hex("readFirmwareMetadata(string)");
+    sel_readFirmware_ = "0x" + h3.substr(0, 8);
+
+    std::string h4 = keccak256_hex("readLatestFirmwareMetadata()");
+    sel_readLatestFirmware_ = "0x" + h4.substr(0, 8);
+
+    std::cout << "[Blockchain] logEvent selector           : " << sel_logEvent_ << "\n";
+    std::cout << "[Blockchain] isLocked selector           : " << sel_isLocked_ << "\n";
+    std::cout << "[Blockchain] readFirmwareMetadata sel    : " << sel_readFirmware_ << "\n";
+    std::cout << "[Blockchain] readLatestFirmwareMetadata  : " << sel_readLatestFirmware_ << "\n";
 
     // Connectivity probe
     std::string probe = R"({"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1})";
@@ -528,3 +537,254 @@ bool BlockchainLogger::isUserLocked(const std::string& username)
 
     return false;
 }
+
+// ---------------------------------------------------------------------------
+// hexToBytes  –  convert hex string (with or without 0x) to raw bytes
+// ---------------------------------------------------------------------------
+std::vector<uint8_t> BlockchainLogger::hexToBytes(const std::string& hex)
+{
+    std::string h = hex;
+    if (h.size() >= 2 && h[0] == '0' && (h[1] == 'x' || h[1] == 'X'))
+        h = h.substr(2);
+    // Ensure even length
+    if (h.size() % 2 != 0) h = "0" + h;
+
+    std::vector<uint8_t> out;
+    out.reserve(h.size() / 2);
+    for (size_t i = 0; i < h.size(); i += 2) {
+        unsigned int byte = 0;
+        std::sscanf(h.c_str() + i, "%02x", &byte);
+        out.push_back(static_cast<uint8_t>(byte));
+    }
+    return out;
+}
+
+// ---------------------------------------------------------------------------
+// abiDecodeUint64  –  decode a big-endian uint256 word at byte offset in data
+//   (clamped to uint64_t for practical firmware sizes)
+// ---------------------------------------------------------------------------
+uint64_t BlockchainLogger::abiDecodeUint64(const std::vector<uint8_t>& data,
+                                            size_t offset)
+{
+    if (offset + 32 > data.size()) return 0;
+    uint64_t val = 0;
+    // Take last 8 bytes of the 32-byte word (big-endian uint256)
+    for (int i = 24; i < 32; ++i)
+        val = (val << 8) | data[offset + i];
+    return val;
+}
+
+// ---------------------------------------------------------------------------
+// abiDecodeString  –  decode a dynamic string from ABI-encoded payload
+//   offset  = absolute byte offset (from start of data) where the string
+//             sub-block starts (i.e. the value pointed to by a head slot)
+// ---------------------------------------------------------------------------
+std::string BlockchainLogger::abiDecodeString(const std::vector<uint8_t>& data,
+                                               size_t offset)
+{
+    if (offset + 32 > data.size()) return "";
+
+    // First 32 bytes at offset = length of the string (uint256)
+    uint64_t len = abiDecodeUint64(data, offset);
+    offset += 32;
+
+    if (len == 0) return "";
+    if (offset + len > data.size()) return "";   // malformed
+
+    return std::string(reinterpret_cast<const char*>(data.data() + offset),
+                       static_cast<size_t>(len));
+}
+
+// ---------------------------------------------------------------------------
+// abiDecodeFirmwareResult
+//   Decodes the ABI-encoded eth_call result from readFirmwareMetadata()
+//   or readLatestFirmwareMetadata() into a FirmwareInfo struct.
+//
+//   has_exists_field = true  → readFirmwareMetadata  (10 return values, last = bool exists)
+//   has_exists_field = false → readLatestFirmwareMetadata (9 return values, no bool)
+//
+//   Return ABI layout (head = N × 32 bytes, then tail = dynamic string data):
+//     [0]  offset → firmwareHash      (string)
+//     [1]  offset → firmwareVersion   (string)
+//     [2]  offset → timestamp         (string)
+//     [3]  offset → signerIdentity    (string)
+//     [4]  offset → downloadUrl       (string)
+//     [5]  offset → imageFilename     (string)
+//     [6]  imageSizeBytes             (uint256, inline)
+//     [7]  offset → finalImageFilename (string)
+//     [8]  finalImageSizeBytes        (uint256, inline)
+//     [9]  exists (bool, inline)      ← only when has_exists_field = true
+// ---------------------------------------------------------------------------
+FirmwareInfo BlockchainLogger::abiDecodeFirmwareResult(const std::string& result_hex,
+                                                        bool has_exists_field)
+{
+    FirmwareInfo info;
+
+    if (result_hex.empty() || result_hex == "0x") {
+        info.error = "Empty result from contract — version may not be registered.";
+        return info;
+    }
+
+    std::vector<uint8_t> data = hexToBytes(result_hex);
+
+    size_t n_params = has_exists_field ? 10 : 9;
+    if (data.size() < n_params * 32) {
+        info.error = "Result too short to decode (" + std::to_string(data.size()) + " bytes).";
+        return info;
+    }
+
+    // Helper: read a 32-byte slot at index i and interpret it as an offset
+    auto readOffset = [&](size_t i) -> size_t {
+        return static_cast<size_t>(abiDecodeUint64(data, i * 32));
+    };
+
+    // Param layout (slot index → field)
+    info.firmware_hash        = abiDecodeString(data, readOffset(0));
+    info.firmware_version     = abiDecodeString(data, readOffset(1));
+    info.timestamp            = abiDecodeString(data, readOffset(2));
+    info.signer_identity      = abiDecodeString(data, readOffset(3));
+    info.download_url         = abiDecodeString(data, readOffset(4));
+    info.image_filename       = abiDecodeString(data, readOffset(5));
+    info.image_size_bytes     = abiDecodeUint64(data, 6 * 32);   // inline uint256
+    info.final_image_filename = abiDecodeString(data, readOffset(7));
+    info.final_image_size_bytes = abiDecodeUint64(data, 8 * 32); // inline uint256
+
+    if (has_exists_field) {
+        // Slot 9: bool exists (last byte of 32-byte word)
+        if (data.size() >= 9 * 32 + 32)
+            info.exists = (data[9 * 32 + 31] != 0);
+    } else {
+        // readLatestFirmwareMetadata always returns a real record
+        info.exists = true;
+    }
+
+    return info;
+}
+
+// ---------------------------------------------------------------------------
+// abiEncodeReadFirmware  –  readFirmwareMetadata(string version)
+//   Calldata layout:
+//     [0:4]    selector
+//     [4:36]   head: offset to string = 0x20
+//     [36:68]  string length
+//     [68:...]  string data (padded to 32 bytes)
+// ---------------------------------------------------------------------------
+std::string BlockchainLogger::abiEncodeReadFirmware(const std::string& version) const
+{
+    // String ABI encoding: offset (32) + length (32) + data (padded)
+    std::string sel = sel_readFirmware_;
+    if (sel.size() >= 2 && sel[0] == '0' && sel[1] == 'x') sel = sel.substr(2);
+
+    // offset to string data = 0x20 (32 bytes, since 1 head slot)
+    std::string offset_hex = leftPad32("20");
+
+    // string length
+    std::ostringstream len_oss;
+    len_oss << std::hex << version.size();
+    std::string len_hex = leftPad32(len_oss.str());
+
+    // string data, right-padded to multiple of 32 bytes
+    std::ostringstream data_oss;
+    for (char c : version)
+        data_oss << std::hex << std::setfill('0') << std::setw(2)
+                 << static_cast<unsigned>(static_cast<uint8_t>(c));
+    std::string data_hex = data_oss.str();
+    // Pad to next 64-hex-char (32-byte) boundary
+    size_t pad = (64 - data_hex.size() % 64) % 64;
+    data_hex += std::string(pad, '0');
+
+    return "0x" + sel + offset_hex + len_hex + data_hex;
+}
+
+// ---------------------------------------------------------------------------
+// abiEncodeReadLatestFirmware  –  readLatestFirmwareMetadata()
+//   Just the 4-byte selector — no parameters.
+// ---------------------------------------------------------------------------
+std::string BlockchainLogger::abiEncodeReadLatestFirmware() const
+{
+    return sel_readLatestFirmware_;   // already "0x" + 8 hex chars
+}
+
+// ---------------------------------------------------------------------------
+// readFirmwareMetadata  –  calls readFirmwareMetadata(string) via eth_call
+// ---------------------------------------------------------------------------
+FirmwareInfo BlockchainLogger::readFirmwareMetadata(
+        const std::string& firmware_contract_addr,
+        const std::string& version) const
+{
+    FirmwareInfo info;
+
+    std::string calldata = abiEncodeReadFirmware(version);
+
+    std::ostringstream body;
+    body << R"({"jsonrpc":"2.0","method":"eth_call","params":[{)"
+         << R"("to":")" << firmware_contract_addr << R"(",)"
+         << R"("data":")" << calldata << R"("},"latest"],"id":10})";
+
+    std::string resp = jsonRPC(body.str());
+    if (resp.empty() || hasError(resp)) {
+        info.error = "eth_call failed for readFirmwareMetadata — RPC error or node unreachable.";
+        std::cerr << "[Blockchain] readFirmwareMetadata failed: " << resp << "\n";
+        return info;
+    }
+
+    std::string result_hex = extractResult(resp);
+    info = abiDecodeFirmwareResult(result_hex, /*has_exists_field=*/true);
+
+    if (info.error.empty()) {
+        std::cout << "[Blockchain] readFirmwareMetadata("  << version << ")\n"
+                  << "  exists           : " << (info.exists ? "true" : "false") << "\n"
+                  << "  firmware_hash    : " << info.firmware_hash    << "\n"
+                  << "  firmware_version : " << info.firmware_version << "\n"
+                  << "  timestamp        : " << info.timestamp        << "\n"
+                  << "  signer_identity  : " << info.signer_identity  << "\n"
+                  << "  download_url     : " << info.download_url     << "\n"
+                  << "  image_filename   : " << info.image_filename   << "\n"
+                  << "  image_size_bytes : " << info.image_size_bytes << "\n"
+                  << "  ldr_filename     : " << info.final_image_filename << "\n"
+                  << "  ldr_size_bytes   : " << info.final_image_size_bytes << "\n";
+    }
+
+    return info;
+}
+
+// ---------------------------------------------------------------------------
+// readLatestFirmwareMetadata  –  calls readLatestFirmwareMetadata() via eth_call
+// ---------------------------------------------------------------------------
+FirmwareInfo BlockchainLogger::readLatestFirmwareMetadata(
+        const std::string& firmware_contract_addr) const
+{
+    FirmwareInfo info;
+
+    std::string calldata = abiEncodeReadLatestFirmware();
+
+    std::ostringstream body;
+    body << R"({"jsonrpc":"2.0","method":"eth_call","params":[{)"
+         << R"("to":")" << firmware_contract_addr << R"(",)"
+         << R"("data":")" << calldata << R"("},"latest"],"id":11})";
+
+    std::string resp = jsonRPC(body.str());
+    if (resp.empty() || hasError(resp)) {
+        info.error = "eth_call failed for readLatestFirmwareMetadata — RPC error or node unreachable.";
+        std::cerr << "[Blockchain] readLatestFirmwareMetadata failed: " << resp << "\n";
+        return info;
+    }
+
+    std::string result_hex = extractResult(resp);
+    info = abiDecodeFirmwareResult(result_hex, /*has_exists_field=*/false);
+
+    if (info.error.empty()) {
+        std::cout << "[Blockchain] readLatestFirmwareMetadata()\n"
+                  << "  firmware_version : " << info.firmware_version << "\n"
+                  << "  firmware_hash    : " << info.firmware_hash    << "\n"
+                  << "  timestamp        : " << info.timestamp        << "\n"
+                  << "  signer_identity  : " << info.signer_identity  << "\n"
+                  << "  download_url     : " << info.download_url     << "\n"
+                  << "  image_size_bytes : " << info.image_size_bytes << "\n"
+                  << "  ldr_filename     : " << info.final_image_filename << "\n"
+                  << "  ldr_size_bytes   : " << info.final_image_size_bytes << "\n";
+    }
+
+    return info;
+}
+
