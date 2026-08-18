@@ -19,6 +19,7 @@
 GPIO* led_gpio = nullptr;
 HttpsServer* server = nullptr;
 FirmwareUpdateManager* fw_manager = nullptr;
+BlockchainLogger* g_blockchain = nullptr;
 std::atomic<bool> running(true);
 std::atomic<bool> pause_led(false);  // Control LED blinking during user input
 std::atomic<int> led_blink_speed(5);  // LED blink interval in seconds (default: 5)
@@ -452,21 +453,53 @@ void* certificateManagementThread(void* arg) {
     pthread_exit(NULL);
 }
 
+// ---------------------------------------------------------------------------
+// computeFileHash  –  SHA-256 of a file; returns lowercase 64-char hex or ""
+// ---------------------------------------------------------------------------
+static std::string computeFileHash(const std::string& path)
+{
+    std::ifstream ifs(path, std::ios::binary);
+    if (!ifs.is_open()) return "";
+
+    EVP_MD_CTX* ctx = EVP_MD_CTX_new();
+    if (!ctx) return "";
+    if (EVP_DigestInit_ex(ctx, EVP_sha256(), nullptr) != 1) {
+        EVP_MD_CTX_free(ctx); return "";
+    }
+    char buf[65536];
+    while (ifs.read(buf, sizeof(buf)) || ifs.gcount() > 0)
+        EVP_DigestUpdate(ctx, buf, static_cast<size_t>(ifs.gcount()));
+
+    unsigned char digest[EVP_MAX_MD_SIZE];
+    unsigned int  len = 0;
+    EVP_DigestFinal_ex(ctx, digest, &len);
+    EVP_MD_CTX_free(ctx);
+
+    std::ostringstream hex;
+    hex << std::hex;
+    for (unsigned int i = 0; i < len; ++i) {
+        hex.width(2); hex.fill('0');
+        hex << static_cast<unsigned int>(digest[i]);
+    }
+    return hex.str();
+}
+
 // Thread function for firmware OTA update management
 //
-// Reads /etc/iot-gateway/firmware.conf on startup and then polls every
-// CHECK_INTERVAL_S seconds.  If the conf file specifies a newer version
-// the update is downloaded, verified, and applied atomically.
-//
-// firmware.conf format (one key=value per line, # comments allowed):
-//   FIRMWARE_URL=https://example.com/iot-gateway-1.2.3.bin
-//   FIRMWARE_VERSION=1.2.3
-//   FIRMWARE_SHA256=<64-char hex digest>
+// firmware.conf keys (one key=value per line, # comments allowed):
+//   FIRMWARE_CONTRACT=0x...          FirmwareMetadataStore contract address
+//   FIRMWARE_HSM_PUBKEY=/etc/iot-gateway/hsm-pubkey.pem
 //   FIRMWARE_CA_CERT=/etc/ssl/certs/ca-certificates.crt
 //   FIRMWARE_TARGET=/usr/bin/iot-gateway
 //   FIRMWARE_STAGING=/tmp/iot-gateway.staging
 //   FIRMWARE_BACKUP=/usr/bin/iot-gateway.bak
 //   FIRMWARE_CHECK_INTERVAL=3600
+//
+// Blockchain pre-check sequence (when FIRMWARE_CONTRACT is set):
+//   1. SHA-256 of running binary vs blockchain firmware_hash  → skip if equal
+//   2. Semver comparison: blockchain version > current        → skip if not newer
+//   3. Approval stage >= OEM_APPROVED                        → skip if pending
+//   4. startUpdate(): download → HSM sig verify → LDR header → SHA-256 → apply
 void* firmwareUpdateThread(void* arg) {
     std::cout << "[FirmwareUpdate Thread] Started" << std::endl;
 
@@ -484,56 +517,117 @@ void* firmwareUpdateThread(void* arg) {
     FirmwareUpdateManager mgr("/usr/bin/iot-gateway", current_version);
     fw_manager = &mgr;
 
-    unsigned int check_interval = 3600; // default: check once per hour
+    unsigned int check_interval = 3600;
 
     while (running) {
-        // Re-read config on every cycle (allows runtime reconfiguration)
+        // ── Parse firmware.conf ───────────────────────────────────────────
         FirmwareUpdateConfig cfg;
-        cfg.ca_cert_path = "/etc/ssl/certs/ca-certificates.crt";
-        cfg.target_path  = "/usr/bin/iot-gateway";
-        cfg.staging_path = "/tmp/iot-gateway.staging";
-        cfg.backup_path  = "/usr/bin/iot-gateway.bak";
+        cfg.ca_cert_path    = "/etc/ssl/certs/ca-certificates.crt";
+        cfg.target_path     = "/usr/bin/iot-gateway";
+        cfg.staging_path    = "/tmp/iot-gateway.staging";
+        cfg.backup_path     = "/usr/bin/iot-gateway.bak";
+
+        std::string fw_contract_addr;
+        std::string fw_hsm_pubkey = "/etc/googlehsmkey/hsm-pubkey.pem";
 
         std::ifstream conf("/etc/iot-gateway/firmware.conf");
-        if (conf.is_open()) {
-            std::string line;
-            while (std::getline(conf, line)) {
-                if (line.empty() || line[0] == '#') continue;
-                auto eq = line.find('=');
-                if (eq == std::string::npos) continue;
-                std::string key = line.substr(0, eq);
-                std::string val = line.substr(eq + 1);
-                while (!val.empty() &&
-                       (val.back() == ' ' || val.back() == '\r' || val.back() == '\t'))
-                    val.pop_back();
-                if      (key == "FIRMWARE_URL")             cfg.url             = val;
-                else if (key == "FIRMWARE_VERSION")         cfg.version         = val;
-                else if (key == "FIRMWARE_SHA256")          cfg.expected_sha256 = val;
-                else if (key == "FIRMWARE_CA_CERT")         cfg.ca_cert_path    = val;
-                else if (key == "FIRMWARE_TARGET")          cfg.target_path     = val;
-                else if (key == "FIRMWARE_STAGING")         cfg.staging_path    = val;
-                else if (key == "FIRMWARE_BACKUP")          cfg.backup_path     = val;
-                else if (key == "FIRMWARE_CHECK_INTERVAL")  check_interval      = static_cast<unsigned int>(std::stoul(val));
-            }
-        } else {
+        if (!conf.is_open()) {
             std::cout << "[FirmwareUpdate] /etc/iot-gateway/firmware.conf not found — "
                          "OTA updates disabled" << std::endl;
-            // Sleep and check again in case conf appears later
             for (unsigned int i = 0; i < check_interval && running; ++i) sleep(1);
             continue;
         }
 
-        // Attempt update only when all required fields are present
-        if (!cfg.url.empty() && !cfg.version.empty() && !cfg.expected_sha256.empty()) {
+        std::string line;
+        while (std::getline(conf, line)) {
+            if (line.empty() || line[0] == '#') continue;
+            auto eq = line.find('=');
+            if (eq == std::string::npos) continue;
+            std::string key = line.substr(0, eq);
+            std::string val = line.substr(eq + 1);
+            while (!val.empty() &&
+                   (val.back() == ' ' || val.back() == '\r' || val.back() == '\t'))
+                val.pop_back();
+            if      (key == "FIRMWARE_CONTRACT")      fw_contract_addr    = val;
+            else if (key == "FIRMWARE_HSM_PUBKEY")    fw_hsm_pubkey       = val;
+            else if (key == "FIRMWARE_CA_CERT")       cfg.ca_cert_path    = val;
+            else if (key == "FIRMWARE_TARGET")        cfg.target_path     = val;
+            else if (key == "FIRMWARE_STAGING")       cfg.staging_path    = val;
+            else if (key == "FIRMWARE_BACKUP")        cfg.backup_path     = val;
+            else if (key == "FIRMWARE_CHECK_INTERVAL")
+                check_interval = static_cast<unsigned int>(std::stoul(val));
+        }
+
+        // ── Blockchain-based update path ──────────────────────────────────
+        if (!fw_contract_addr.empty()) {
+            if (!g_blockchain) {
+                std::cout << "[FirmwareUpdate] Waiting for blockchain logger to initialise...\n";
+                for (unsigned int i = 0; i < check_interval && running; ++i) sleep(1);
+                continue;
+            }
+
+            // Step A: Query blockchain for latest firmware metadata
+            FirmwareInfo info = g_blockchain->readLatestFirmwareMetadata(fw_contract_addr);
+            if (!info.error.empty()) {
+                std::cerr << "[FirmwareUpdate] Blockchain query failed: " << info.error << "\n";
+                for (unsigned int i = 0; i < check_interval && running; ++i) sleep(1);
+                continue;
+            }
+
+            // Step B: Extract hex digest from "sha256:<hex>" in blockchain metadata
+            std::string bc_hash_hex = info.firmware_hash;
+            if (bc_hash_hex.size() > 7 && bc_hash_hex.substr(0, 7) == "sha256:")
+                bc_hash_hex = bc_hash_hex.substr(7);
+
+            // Step C: Compare hash of running binary with blockchain hash — skip if equal
+            std::string current_hash = computeFileHash(cfg.target_path);
+            if (!current_hash.empty() && current_hash == bc_hash_hex) {
+                std::cout << "[FirmwareUpdate] Running binary hash matches blockchain — already up to date\n";
+                for (unsigned int i = 0; i < check_interval && running; ++i) sleep(1);
+                continue;
+            }
+
+            // Step D: Version must be strictly newer
+            int cmp = FirmwareUpdateManager::compareSemver(info.firmware_version,
+                                                            current_version);
+            if (cmp <= 0) {
+                std::cout << "[FirmwareUpdate] Blockchain version " << info.firmware_version
+                          << " is not newer than running " << current_version << " — skip\n";
+                for (unsigned int i = 0; i < check_interval && running; ++i) sleep(1);
+                continue;
+            }
+
+            // Step E: Approval stage — require at least OEM_APPROVED
+            if (info.approval_stage < ApprovalStage::OEM_APPROVED) {
+                std::cout << "[FirmwareUpdate] Firmware not yet approved by OEM — stage: "
+                          << approvalStageLabel(info.approval_stage) << "\n";
+                for (unsigned int i = 0; i < check_interval && running; ++i) sleep(1);
+                continue;
+            }
+
+            // Step F: Build update config from blockchain metadata
+            cfg.url             = info.download_url;
+            cfg.version         = info.firmware_version;
+            cfg.expected_sha256 = bc_hash_hex;
+            cfg.hsm_pubkey_path = fw_hsm_pubkey;
+            cfg.hsm_sig_url     = info.download_url + ".sig";  // derive sig URL from firmware URL
+
+            // Step G: Trigger update (download → HSM sig → LDR header → SHA-256 → apply)
             FirmwareUpdateStatus cur = mgr.getStatus();
-            if (cur == FirmwareUpdateStatus::IDLE ||
+            if (cur == FirmwareUpdateStatus::IDLE   ||
                 cur == FirmwareUpdateStatus::SUCCESS ||
                 cur == FirmwareUpdateStatus::FAILED) {
-                std::cout << "[FirmwareUpdate] Checking for update: remote version "
-                          << cfg.version << ", local version "
-                          << mgr.getCurrentVersion() << std::endl;
-                mgr.startUpdate(cfg); // no-op if already up-to-date or downgrade
+                std::cout << "[FirmwareUpdate] Starting blockchain-triggered OTA to version "
+                          << info.firmware_version
+                          << "  approval=" << approvalStageLabel(info.approval_stage)
+                          << "  oem=" << info.approved_by_oem << "\n";
+                mgr.startUpdate(cfg);
             }
+
+        } else {
+            // ── Legacy conf-based path (no blockchain contract configured) ─
+            std::cerr << "[FirmwareUpdate] FIRMWARE_CONTRACT not set — "
+                         "blockchain-based OTA disabled\n";
         }
 
         // Wait for the check interval, waking early if shutdown is requested
@@ -615,6 +709,7 @@ void* httpsServerThread(void* arg) {
     }
 
     HttpsServer::initMFA(&user_auth, blockchain);
+    g_blockchain = blockchain;  // expose to firmwareUpdateThread for metadata queries
     // ────────────────────────────────────────────────────────────────────────
     
     // Pass the Root CA so the HTTPS server enforces mTLS: only connections

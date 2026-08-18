@@ -600,20 +600,25 @@ std::string BlockchainLogger::abiDecodeString(const std::vector<uint8_t>& data,
 //   Decodes the ABI-encoded eth_call result from readFirmwareMetadata()
 //   or readLatestFirmwareMetadata() into a FirmwareInfo struct.
 //
-//   has_exists_field = true  → readFirmwareMetadata  (10 return values, last = bool exists)
-//   has_exists_field = false → readLatestFirmwareMetadata (9 return values, no bool)
+//   has_exists_field = true  → readFirmwareMetadata  (15 return values, last = bool exists)
+//   has_exists_field = false → readLatestFirmwareMetadata (14 return values, no bool)
 //
 //   Return ABI layout (head = N × 32 bytes, then tail = dynamic string data):
-//     [0]  offset → firmwareHash      (string)
-//     [1]  offset → firmwareVersion   (string)
-//     [2]  offset → timestamp         (string)
-//     [3]  offset → signerIdentity    (string)
-//     [4]  offset → downloadUrl       (string)
-//     [5]  offset → imageFilename     (string)
-//     [6]  imageSizeBytes             (uint256, inline)
-//     [7]  offset → finalImageFilename (string)
-//     [8]  finalImageSizeBytes        (uint256, inline)
-//     [9]  exists (bool, inline)      ← only when has_exists_field = true
+//     [0]  offset → firmwareHash          (string)
+//     [1]  offset → firmwareVersion       (string)
+//     [2]  offset → timestamp             (string)
+//     [3]  offset → signerIdentity        (string)
+//     [4]  offset → downloadUrl           (string)
+//     [5]  offset → imageFilename         (string)
+//     [6]  imageSizeBytes                 (uint256, inline)
+//     [7]  offset → finalImageFilename    (string)
+//     [8]  finalImageSizeBytes            (uint256, inline)
+//     [9]  approvalStage                  (uint8 as uint256, inline)
+//     [10] offset → approvedByOem         (string)
+//     [11] offset → oemApprovedAt         (string)
+//     [12] offset → approvedByFleet       (string)
+//     [13] offset → fleetApprovedAt       (string)
+//     [14] exists (bool, inline)          ← only when has_exists_field = true
 // ---------------------------------------------------------------------------
 FirmwareInfo BlockchainLogger::abiDecodeFirmwareResult(const std::string& result_hex,
                                                         bool has_exists_field)
@@ -627,7 +632,7 @@ FirmwareInfo BlockchainLogger::abiDecodeFirmwareResult(const std::string& result
 
     std::vector<uint8_t> data = hexToBytes(result_hex);
 
-    size_t n_params = has_exists_field ? 10 : 9;
+    size_t n_params = has_exists_field ? 15 : 14;
     if (data.size() < n_params * 32) {
         info.error = "Result too short to decode (" + std::to_string(data.size()) + " bytes).";
         return info;
@@ -638,21 +643,31 @@ FirmwareInfo BlockchainLogger::abiDecodeFirmwareResult(const std::string& result
         return static_cast<size_t>(abiDecodeUint64(data, i * 32));
     };
 
-    // Param layout (slot index → field)
-    info.firmware_hash        = abiDecodeString(data, readOffset(0));
-    info.firmware_version     = abiDecodeString(data, readOffset(1));
-    info.timestamp            = abiDecodeString(data, readOffset(2));
-    info.signer_identity      = abiDecodeString(data, readOffset(3));
-    info.download_url         = abiDecodeString(data, readOffset(4));
-    info.image_filename       = abiDecodeString(data, readOffset(5));
-    info.image_size_bytes     = abiDecodeUint64(data, 6 * 32);   // inline uint256
-    info.final_image_filename = abiDecodeString(data, readOffset(7));
-    info.final_image_size_bytes = abiDecodeUint64(data, 8 * 32); // inline uint256
+    // Slots 0-8: existing fields (unchanged)
+    info.firmware_hash          = abiDecodeString(data, readOffset(0));
+    info.firmware_version       = abiDecodeString(data, readOffset(1));
+    info.timestamp              = abiDecodeString(data, readOffset(2));
+    info.signer_identity        = abiDecodeString(data, readOffset(3));
+    info.download_url           = abiDecodeString(data, readOffset(4));
+    info.image_filename         = abiDecodeString(data, readOffset(5));
+    info.image_size_bytes       = abiDecodeUint64(data, 6 * 32);   // inline uint256
+    info.final_image_filename   = abiDecodeString(data, readOffset(7));
+    info.final_image_size_bytes = abiDecodeUint64(data, 8 * 32);   // inline uint256
+
+    // Slot 9: approval_stage (uint8 stored as uint256, inline)
+    info.approval_stage = static_cast<ApprovalStage>(
+        static_cast<uint8_t>(abiDecodeUint64(data, 9 * 32) & 0xFF));
+
+    // Slots 10-13: approval chain strings
+    info.approved_by_oem    = abiDecodeString(data, readOffset(10));
+    info.oem_approved_at    = abiDecodeString(data, readOffset(11));
+    info.approved_by_fleet  = abiDecodeString(data, readOffset(12));
+    info.fleet_approved_at  = abiDecodeString(data, readOffset(13));
 
     if (has_exists_field) {
-        // Slot 9: bool exists (last byte of 32-byte word)
-        if (data.size() >= 9 * 32 + 32)
-            info.exists = (data[9 * 32 + 31] != 0);
+        // Slot 14: bool exists (last byte of 32-byte word)
+        if (data.size() >= 14 * 32 + 32)
+            info.exists = (data[14 * 32 + 31] != 0);
     } else {
         // readLatestFirmwareMetadata always returns a real record
         info.exists = true;
@@ -732,17 +747,23 @@ FirmwareInfo BlockchainLogger::readFirmwareMetadata(
     info = abiDecodeFirmwareResult(result_hex, /*has_exists_field=*/true);
 
     if (info.error.empty()) {
-        std::cout << "[Blockchain] readFirmwareMetadata("  << version << ")\n"
-                  << "  exists           : " << (info.exists ? "true" : "false") << "\n"
-                  << "  firmware_hash    : " << info.firmware_hash    << "\n"
-                  << "  firmware_version : " << info.firmware_version << "\n"
-                  << "  timestamp        : " << info.timestamp        << "\n"
-                  << "  signer_identity  : " << info.signer_identity  << "\n"
-                  << "  download_url     : " << info.download_url     << "\n"
-                  << "  image_filename   : " << info.image_filename   << "\n"
-                  << "  image_size_bytes : " << info.image_size_bytes << "\n"
-                  << "  ldr_filename     : " << info.final_image_filename << "\n"
-                  << "  ldr_size_bytes   : " << info.final_image_size_bytes << "\n";
+        std::cout << "[Blockchain] readFirmwareMetadata(" << version << ")\n"
+                  << "  exists             : " << (info.exists ? "true" : "false") << "\n"
+                  << "  firmware_version   : " << info.firmware_version << "\n"
+                  << "  firmware_hash      : " << info.firmware_hash    << "\n"
+                  << "  timestamp          : " << info.timestamp        << "\n"
+                  << "  signer_identity    : " << info.signer_identity  << "\n"
+                  << "  download_url       : " << info.download_url     << "\n"
+                  << "  image_filename     : " << info.image_filename   << "\n"
+                  << "  image_size_bytes   : " << info.image_size_bytes << "\n"
+                  << "  ldr_filename       : " << info.final_image_filename << "\n"
+                  << "  ldr_size_bytes     : " << info.final_image_size_bytes << "\n"
+                  << "  approval_stage     : " << approvalStageLabel(info.approval_stage) << "\n"
+                  << "  approved_by_oem    : " << info.approved_by_oem   << "\n"
+                  << "  oem_approved_at    : " << info.oem_approved_at   << "\n"
+                  << "  approved_by_fleet  : " << info.approved_by_fleet << "\n"
+                  << "  fleet_approved_at  : " << info.fleet_approved_at << "\n"
+                  << "  device_eligible    : " << (info.isReleasedToDevice() ? "YES" : "NO") << "\n";
     }
 
     return info;
@@ -775,14 +796,20 @@ FirmwareInfo BlockchainLogger::readLatestFirmwareMetadata(
 
     if (info.error.empty()) {
         std::cout << "[Blockchain] readLatestFirmwareMetadata()\n"
-                  << "  firmware_version : " << info.firmware_version << "\n"
-                  << "  firmware_hash    : " << info.firmware_hash    << "\n"
-                  << "  timestamp        : " << info.timestamp        << "\n"
-                  << "  signer_identity  : " << info.signer_identity  << "\n"
-                  << "  download_url     : " << info.download_url     << "\n"
-                  << "  image_size_bytes : " << info.image_size_bytes << "\n"
-                  << "  ldr_filename     : " << info.final_image_filename << "\n"
-                  << "  ldr_size_bytes   : " << info.final_image_size_bytes << "\n";
+                  << "  firmware_version   : " << info.firmware_version << "\n"
+                  << "  firmware_hash      : " << info.firmware_hash    << "\n"
+                  << "  timestamp          : " << info.timestamp        << "\n"
+                  << "  signer_identity    : " << info.signer_identity  << "\n"
+                  << "  download_url       : " << info.download_url     << "\n"
+                  << "  image_size_bytes   : " << info.image_size_bytes << "\n"
+                  << "  ldr_filename       : " << info.final_image_filename << "\n"
+                  << "  ldr_size_bytes     : " << info.final_image_size_bytes << "\n"
+                  << "  approval_stage     : " << approvalStageLabel(info.approval_stage) << "\n"
+                  << "  approved_by_oem    : " << info.approved_by_oem   << "\n"
+                  << "  oem_approved_at    : " << info.oem_approved_at   << "\n"
+                  << "  approved_by_fleet  : " << info.approved_by_fleet << "\n"
+                  << "  fleet_approved_at  : " << info.fleet_approved_at << "\n"
+                  << "  device_eligible    : " << (info.isReleasedToDevice() ? "YES" : "NO") << "\n";
     }
 
     return info;

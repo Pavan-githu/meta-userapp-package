@@ -58,24 +58,74 @@
 #include <cstdint>
 #include <ctime>
 #include <deque>
+#include <vector>
 #include <pthread.h>
+
+// ---------------------------------------------------------------------------
+// ApprovalStage — sequential approval chain enforced by FirmwareMetadataStore.
+// A device may only install firmware that has reached FLEET_RELEASED.
+// Must match the ApprovalStage enum in FirmwareMetadataStore.sol.
+// ---------------------------------------------------------------------------
+enum class ApprovalStage : uint8_t {
+    SUPPLIER_REGISTERED = 0,  // supplier uploaded; awaiting OEM review
+    OEM_APPROVED        = 1,  // OEM confirmed; awaiting fleet operator release
+    FLEET_RELEASED      = 2,  // fleet operator approved; device may install
+};
+
+inline const char* approvalStageLabel(ApprovalStage s) {
+    switch (s) {
+        case ApprovalStage::SUPPLIER_REGISTERED: return "SUPPLIER_REGISTERED";
+        case ApprovalStage::OEM_APPROVED:        return "OEM_APPROVED";
+        case ApprovalStage::FLEET_RELEASED:      return "FLEET_RELEASED";
+        default:                                  return "UNKNOWN";
+    }
+}
 
 // ---------------------------------------------------------------------------
 // FirmwareInfo — mirrors FirmwareMetadataStore.FirmwareMetadata in Solidity.
 // Populated by readFirmwareMetadata() / readLatestFirmwareMetadata().
+//
+// ABI slot layout (contract return order):
+//   [0]  firmware_hash          (string)
+//   [1]  firmware_version       (string)
+//   [2]  timestamp              (string)
+//   [3]  signer_identity        (string)
+//   [4]  download_url           (string)
+//   [5]  image_filename         (string)
+//   [6]  image_size_bytes       (uint256, inline)
+//   [7]  final_image_filename   (string)
+//   [8]  final_image_size_bytes (uint256, inline)
+//   [9]  approval_stage         (uint8 as uint256, inline)
+//   [10] approved_by_oem        (string)
+//   [11] oem_approved_at        (string)
+//   [12] approved_by_fleet      (string)
+//   [13] fleet_approved_at      (string)
+//   [14] exists                 (bool, inline) — readFirmwareMetadata only
 // ---------------------------------------------------------------------------
 struct FirmwareInfo {
-    std::string firmware_hash;          // "sha256:<hex>"
-    std::string firmware_version;       // "v0.1.0"
-    std::string timestamp;              // "2026-06-29T16:36:52Z"
-    std::string signer_identity;        // "TechID:5678"
-    std::string download_url;           // GitHub release URL
-    std::string image_filename;         // .wic.bz2 filename
-    uint64_t    image_size_bytes  = 0;
-    std::string final_image_filename;   // RPIF_*.ldr filename
-    uint64_t    final_image_size_bytes = 0;
-    bool        exists            = false;  // false → version not registered
-    std::string error;                  // non-empty on RPC / decode failure
+    std::string   firmware_hash;              // "sha256:<hex>"
+    std::string   firmware_version;           // "v0.1.0"
+    std::string   timestamp;                  // "2026-06-29T16:36:52Z"
+    std::string   signer_identity;            // "TechID:5678"
+    std::string   download_url;               // GitHub release URL
+    std::string   image_filename;             // .wic.bz2 filename (initial flash)
+    uint64_t      image_size_bytes      = 0;
+    std::string   final_image_filename;       // RPIF_*.ldr / .raucb filename (OTA)
+    uint64_t      final_image_size_bytes = 0;
+    // ── Approval chain ────────────────────────────────────────────────────
+    ApprovalStage approval_stage = ApprovalStage::SUPPLIER_REGISTERED;
+    std::string   approved_by_oem;            // OEM identity or Ethereum address
+    std::string   oem_approved_at;            // ISO timestamp of OEM approval
+    std::string   approved_by_fleet;          // fleet operator identity
+    std::string   fleet_approved_at;          // ISO timestamp of fleet release
+    // ─────────────────────────────────────────────────────────────────────
+    bool          exists = false;             // false → version not registered
+    std::string   error;                      // non-empty on RPC / decode failure
+
+    // Returns true only when the full approval chain is complete.
+    bool isReleasedToDevice() const {
+        return exists && approval_stage == ApprovalStage::FLEET_RELEASED;
+    }
 };
 
 class BlockchainLogger {

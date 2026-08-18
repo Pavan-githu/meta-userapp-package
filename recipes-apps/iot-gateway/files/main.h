@@ -20,6 +20,7 @@ struct HttpsThreadArgs {
 extern GPIO* led_gpio;
 extern HttpsServer* server;
 extern FirmwareUpdateManager* fw_manager;
+extern BlockchainLogger* g_blockchain;   // set by httpsServerThread; read by firmwareUpdateThread
 extern std::atomic<bool> running;
 extern std::atomic<bool> pause_led;
 extern std::atomic<int> led_blink_speed;

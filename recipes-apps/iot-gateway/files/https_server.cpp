@@ -3,8 +3,10 @@
 #include "user_auth.h"
 #include "otp_manager.h"
 #include "blockchain_logger.h"
+#include "firmwareupdate.h"
 
 #include <iostream>
+#include <fstream>
 #include <gnutls/gnutls.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -16,6 +18,7 @@
 #include <map>
 #include <cstdio>
 #include <ctime>
+#include <openssl/evp.h>
 
 // ---------------------------------------------------------------------------
 // Static MFA state
@@ -29,6 +32,26 @@ std::vector<std::string>           HttpsServer::s_activity_log;
 
 // Legacy password-only fallback (used when s_user_auth is not set)
 std::map<std::string, std::string> HttpsServer::user_db;
+
+// ---------------------------------------------------------------------------
+// computeLocalFileHash  –  SHA-256 of a file; returns lowercase 64-char hex
+// ---------------------------------------------------------------------------
+static std::string computeLocalFileHash(const std::string& path)
+{
+    std::ifstream ifs(path, std::ios::binary);
+    if (!ifs.is_open()) return "";
+    EVP_MD_CTX* ctx = EVP_MD_CTX_new();
+    if (!ctx) return "";
+    if (EVP_DigestInit_ex(ctx, EVP_sha256(), nullptr) != 1) { EVP_MD_CTX_free(ctx); return ""; }
+    char buf[65536];
+    while (ifs.read(buf, sizeof(buf)) || ifs.gcount() > 0)
+        EVP_DigestUpdate(ctx, buf, static_cast<size_t>(ifs.gcount()));
+    unsigned char digest[EVP_MAX_MD_SIZE]; unsigned int len = 0;
+    EVP_DigestFinal_ex(ctx, digest, &len); EVP_MD_CTX_free(ctx);
+    std::ostringstream hex; hex << std::hex;
+    for (unsigned int i = 0; i < len; ++i) { hex.width(2); hex.fill('0'); hex << static_cast<unsigned int>(digest[i]); }
+    return hex.str();
+}
 
 // ---------------------------------------------------------------------------
 // addActivityLog  –  prepend timestamped entry, keep last 20
@@ -1505,11 +1528,11 @@ MHD_Result HttpsServer::handleOtpPost(struct MHD_Connection* connection,
         "<p><small>Blockchain session ID: " + session_id.substr(0, 16) + "...</small></p>"
         "<hr/>"
         "<h2>IoT Gateway Dashboard</h2>"
-        "<h3>Firmware Upload</h3>"
-        "<form action=\"/upload\" method=\"post\" enctype=\"multipart/form-data\">"
-        "<input type=\"file\" name=\"file\"/>"
-        "<input type=\"submit\" value=\"Upload\"/>"
-        "</form>"
+        "<h3>Firmware Update</h3>"
+        "<a href='/fw-check'>"
+        "<button style='padding:10px 20px;background:#27ae60;color:#fff;border:none;"
+        "border-radius:6px;font-size:1em;cursor:pointer;'>"
+        "&#128190; Check Blockchain for Latest Firmware</button></a>"
         "<h3>LED Control</h3>"
         "<p><a href=\"/startledblink?speed=5\">Blink 5s</a> | "
         "<a href=\"/startledblink?speed=1\">Blink 1s</a> | "
@@ -1528,6 +1551,339 @@ MHD_Result HttpsServer::handleOtpPost(struct MHD_Connection* connection,
     MHD_Result ret = MHD_queue_response(connection, MHD_HTTP_OK, resp);
     MHD_destroy_response(resp);
     return ret;
+}
+
+// ---------------------------------------------------------------------------
+// handleFirmwareCheck  –  GET /fw-check
+//   Displays the full blockchain access report: node connectivity, OEM/fleet
+//   approval chain, hash/version comparison, and install permission decision.
+// ---------------------------------------------------------------------------
+MHD_Result HttpsServer::handleFirmwareCheck(struct MHD_Connection* connection)
+{
+    // ── Read firmware.conf ────────────────────────────────────────────────
+    std::string fw_contract_addr;
+    std::string fw_hsm_pubkey = "/etc/googlehsmkey/hsm-pubkey.pem";
+    std::string ca_cert       = "/etc/ssl/certs/ca-certificates.crt";
+
+    std::ifstream conf("/etc/iot-gateway/firmware.conf");
+    if (conf.is_open()) {
+        std::string ln;
+        while (std::getline(conf, ln)) {
+            if (ln.empty() || ln[0] == '#') continue;
+            auto eq = ln.find('=');
+            if (eq == std::string::npos) continue;
+            std::string k = ln.substr(0, eq), v = ln.substr(eq + 1);
+            while (!v.empty() && (v.back() == ' ' || v.back() == '\r' || v.back() == '\t')) v.pop_back();
+            if      (k == "FIRMWARE_CONTRACT")   fw_contract_addr = v;
+            else if (k == "FIRMWARE_HSM_PUBKEY") fw_hsm_pubkey    = v;
+            else if (k == "FIRMWARE_CA_CERT")    ca_cert          = v;
+        }
+    }
+
+    // ── Step 1: Blockchain connectivity check ─────────────────────────────
+    bool bc_reachable = false;
+    std::string bc_detail;
+    if (s_blockchain) {
+        bc_reachable = s_blockchain->checkConnectivity(bc_detail);
+        if (bc_reachable) bc_detail = s_blockchain->getStatusString();
+    } else {
+        bc_detail = "Blockchain logger not initialised — check blockchain.conf";
+    }
+
+    const std::string CSS =
+        "body{font-family:Arial,sans-serif;padding:24px;max-width:900px;margin:auto;background:#f8f9fa;}"
+        "h1{color:#2c3e50;margin-bottom:4px;}h2{color:#34495e;margin-top:28px;margin-bottom:10px;}"
+        ".card{background:#fff;border-radius:8px;box-shadow:0 1px 6px rgba(0,0,0,0.10);padding:18px 22px;margin:14px 0;}"
+        "table{width:100%;border-collapse:collapse;font-size:0.9em;}"
+        "th{background:#f0f4f8;text-align:left;padding:8px 12px;color:#555;}"
+        "td{padding:8px 12px;border-bottom:1px solid #f0f0f0;word-break:break-all;}"
+        ".tag{display:inline-block;padding:3px 10px;border-radius:12px;font-size:0.82em;font-weight:bold;}"
+        ".tag-ok{background:#d4edda;color:#155724;}"
+        ".tag-warn{background:#fff3cd;color:#856404;}"
+        ".tag-block{background:#f8d7da;color:#721c24;}"
+        ".tag-info{background:#cce5ff;color:#004085;}"
+        ".verdict{border-radius:8px;padding:18px 22px;margin:20px 0;font-size:1.08em;}"
+        ".verdict-ok{background:#d4edda;color:#155724;border-left:5px solid #28a745;}"
+        ".verdict-block{background:#f8d7da;color:#721c24;border-left:5px solid #dc3545;}"
+        ".verdict-warn{background:#fff3cd;color:#856404;border-left:5px solid #ffc107;}"
+        ".btn{display:inline-block;padding:11px 26px;border-radius:6px;border:none;cursor:pointer;font-size:1em;text-decoration:none;margin:6px 4px;}"
+        ".btn-go{background:#27ae60;color:#fff;}"
+        ".btn-back{background:#3498db;color:#fff;}"
+        ".blocked-notice{background:#f8d7da;border:2px solid #dc3545;border-radius:8px;"
+        "padding:18px 22px;margin:20px 0;color:#721c24;}";
+
+    // ── Section 1: Blockchain access report ───────────────────────────────
+    std::string bc_tag   = bc_reachable
+        ? "<span class='tag tag-ok'>&#9989; CONNECTED</span>"
+        : "<span class='tag tag-block'>&#10060; UNREACHABLE</span>";
+    std::string conf_tag = fw_contract_addr.empty()
+        ? "<span class='tag tag-block'>&#10060; NOT CONFIGURED</span>"
+        : "<span class='tag tag-ok'>&#9989; " + fw_contract_addr.substr(0, 10) + "...</span>";
+
+    std::string page =
+        "<!DOCTYPE html><html lang='en'>"
+        "<head><meta charset='UTF-8'><title>Firmware Update Report</title>"
+        "<style>" + CSS + "</style></head><body>"
+        "<h1>&#128202; Firmware Update Report</h1>"
+        "<p style='color:#666;font-size:0.9em;'>Live check against Ethereum blockchain ledger</p>"
+
+        "<div class='card'>"
+        "<h2>&#128279; Blockchain Access</h2>"
+        "<table><tr><th>Parameter</th><th>Status</th></tr>"
+        "<tr><td>Ethereum Node</td><td>" + bc_tag + "<br/>"
+            "<small style='color:#888;'>" + bc_detail + "</small></td></tr>"
+        "<tr><td>FirmwareMetadataStore Contract</td><td>" + conf_tag + "</td></tr>"
+        "</table></div>";
+
+    // If blockchain is unreachable or contract not configured, stop here
+    if (!bc_reachable || fw_contract_addr.empty()) {
+        page +=
+            "<div class='blocked-notice'>"
+            "<strong style='font-size:1.1em;'>&#128683; Download &amp; Install: NOT ALLOWED</strong><br/><br/>"
+            + std::string(!bc_reachable
+                ? "The Ethereum blockchain node is unreachable. The OEM approval status cannot be "
+                  "verified. Firmware download and installation are <strong>blocked</strong> until "
+                  "the blockchain is accessible."
+                : "No <code>FIRMWARE_CONTRACT</code> address is configured in "
+                  "<code>/etc/iot-gateway/firmware.conf</code>. The firmware metadata ledger "
+                  "cannot be queried.")
+            + "</div>"
+            "<a href='/fw-check' class='btn btn-back'>&#8635; Retry</a>&nbsp;"
+            "<a href='/status'  class='btn btn-back'>&#8592; System Status</a>"
+            "</body></html>";
+        return sendResponse(connection, page, MHD_HTTP_SERVICE_UNAVAILABLE);
+    }
+
+    // ── Step 2: Read latest metadata from blockchain ledger ───────────────
+    FirmwareInfo info = s_blockchain->readLatestFirmwareMetadata(fw_contract_addr);
+    if (!info.error.empty()) {
+        page +=
+            "<div class='blocked-notice'>"
+            "<strong style='font-size:1.1em;'>&#128683; Download &amp; Install: NOT ALLOWED</strong><br/><br/>"
+            "Blockchain query failed: " + info.error +
+            "</div>"
+            "<a href='/fw-check' class='btn btn-back'>&#8635; Retry</a>"
+            "</body></html>";
+        return sendResponse(connection, page, MHD_HTTP_SERVICE_UNAVAILABLE);
+    }
+
+    // ── Step 3: OEM / Fleet approval report ───────────────────────────────
+    bool oem_approved   = (info.approval_stage >= ApprovalStage::OEM_APPROVED);
+    bool fleet_released = (info.approval_stage >= ApprovalStage::FLEET_RELEASED);
+
+    std::string stage_tag;
+    if (fleet_released)
+        stage_tag = "<span class='tag tag-ok'>&#9989; FLEET_RELEASED</span>";
+    else if (oem_approved)
+        stage_tag = "<span class='tag tag-info'>&#128203; OEM_APPROVED</span>";
+    else
+        stage_tag = "<span class='tag tag-block'>&#128683; SUPPLIER_REGISTERED (pending)</span>";
+
+    std::string oem_row =
+        oem_approved
+        ? "<span class='tag tag-ok'>&#9989; APPROVED</span>"
+          " &nbsp;<small>" + info.approved_by_oem + " &bull; " + info.oem_approved_at + "</small>"
+        : "<span class='tag tag-block'>&#10060; NOT YET APPROVED</span>"
+          " &nbsp;<small style='color:#888;'>OEM has not reviewed this firmware</small>";
+
+    std::string fleet_row =
+        fleet_released
+        ? "<span class='tag tag-ok'>&#9989; RELEASED</span>"
+          " &nbsp;<small>" + info.approved_by_fleet + " &bull; " + info.fleet_approved_at + "</small>"
+        : (oem_approved
+            ? "<span class='tag tag-warn'>&#9203; PENDING</span>"
+              " &nbsp;<small style='color:#888;'>Awaiting fleet operator release</small>"
+            : "<span class='tag tag-block'>&#10060; BLOCKED</span>"
+              " &nbsp;<small style='color:#888;'>OEM must approve first</small>");
+
+    page +=
+        "<div class='card'>"
+        "<h2>&#9989; OEM &amp; Fleet Approval Chain</h2>"
+        "<table><tr><th>Stage</th><th>Result</th></tr>"
+        "<tr><td>Overall Approval Stage</td><td>" + stage_tag + "</td></tr>"
+        "<tr><td>1. OEM Approval</td><td>" + oem_row + "</td></tr>"
+        "<tr><td>2. Fleet Operator Release</td><td>" + fleet_row + "</td></tr>"
+        "<tr><td>Firmware Version</td><td><strong>" + info.firmware_version + "</strong></td></tr>"
+        "<tr><td>Signed By</td><td>" + info.signer_identity + "</td></tr>"
+        "<tr><td>Registered At</td><td>" + info.timestamp + "</td></tr>"
+        "</table></div>";
+
+    // ── Step 4: Hash / version comparison ────────────────────────────────
+    std::string current_hash    = computeLocalFileHash("/usr/bin/iot-gateway");
+    std::string current_version = fw_manager ? fw_manager->getCurrentVersion() : "0.0.0";
+    std::string bc_hash_hex     = info.firmware_hash;
+    if (bc_hash_hex.size() > 7 && bc_hash_hex.substr(0, 7) == "sha256:")
+        bc_hash_hex = bc_hash_hex.substr(7);
+
+    bool hash_differs  = current_hash.empty() || (current_hash != bc_hash_hex);
+    bool version_newer = (FirmwareUpdateManager::compareSemver(info.firmware_version, current_version) > 0);
+
+    page +=
+        "<div class='card'>"
+        "<h2>&#128190; Firmware Comparison</h2>"
+        "<table><tr><th>Field</th><th>Blockchain (latest)</th><th>Running on device</th></tr>"
+        "<tr><td>Version</td>"
+        "<td><strong>" + info.firmware_version + "</strong>"
+            + (version_newer ? " <span class='tag tag-ok'>newer</span>"
+                             : " <span class='tag tag-warn'>not newer</span>") + "</td>"
+        "<td>" + current_version + "</td></tr>"
+        "<tr><td>SHA-256</td>"
+        "<td style='font-family:monospace;font-size:0.78em;'>" + (bc_hash_hex.size() > 16 ? bc_hash_hex.substr(0,16)+"..." : bc_hash_hex) + "</td>"
+        "<td style='font-family:monospace;font-size:0.78em;'>"
+            + (current_hash.empty() ? "<i style='color:red;'>error</i>" : current_hash.substr(0,16)+"...") + "</td></tr>"
+        "<tr><td>Hash match?</td>"
+        "<td colspan='2'>" + (hash_differs
+            ? "<span class='tag tag-ok'>&#9989; Different — update available</span>"
+            : "<span class='tag tag-info'>&#9989; Identical — already up to date</span>") + "</td></tr>"
+        "<tr><td>Download URL</td><td colspan='2' style='font-size:0.85em;'>" + info.download_url + "</td></tr>"
+        "</table></div>";
+
+    // ── Step 5: Install permission decision ───────────────────────────────
+    bool eligible = hash_differs && version_newer && oem_approved;
+
+    if (eligible) {
+        page +=
+            "<div class='verdict verdict-ok'>"
+            "<strong style='font-size:1.15em;'>&#9989; Download &amp; Install: ALLOWED</strong><br/>"
+            "All conditions satisfied: firmware is newer, hash differs, and OEM has approved.<br/>"
+            "<small>Install sequence: HTTPS download &rarr; Google HSM signature verify "
+            "&rarr; LDR header validate &rarr; SHA-256 check &rarr; atomic install</small>"
+            "</div>"
+            "<form action='/fw-update-trigger' method='post'>"
+            "<button type='submit' class='btn btn-go'>&#128197; Install Firmware "
+            + info.firmware_version + "</button></form>";
+    } else {
+        // Build specific reason
+        std::string reason;
+        if (!oem_approved)
+            reason = "OEM has <strong>not approved</strong> this firmware. "
+                     "The approval stage is <em>" + std::string(approvalStageLabel(info.approval_stage)) +
+                     "</em>. An OEM administrator must call <code>approveByOem()</code> on the "
+                     "FirmwareMetadataStore contract before this firmware can be downloaded or installed.";
+        else if (!version_newer)
+            reason = "The blockchain firmware version <strong>" + info.firmware_version +
+                     "</strong> is not newer than the currently running version <strong>" +
+                     current_version + "</strong>. No update is needed.";
+        else
+            reason = "The running firmware hash already matches the blockchain record. The device is up to date.";
+
+        page +=
+            "<div class='blocked-notice'>"
+            "<strong style='font-size:1.15em;'>&#128683; Download &amp; Install: NOT ALLOWED</strong><br/><br/>"
+            + reason +
+            "</div>";
+    }
+
+    page += "<br/><a href='/fw-check' class='btn btn-back'>&#8635; Refresh</a>&nbsp;"
+            "<a href='/status' class='btn btn-back'>&#8592; System Status</a>"
+            "</body></html>";
+
+    addActivityLog("[FIRMWARE] Web report: " + info.firmware_version +
+                   " stage=" + approvalStageLabel(info.approval_stage) +
+                   " eligible=" + (eligible ? "YES" : "NO"));
+    return sendResponse(connection, page, MHD_HTTP_OK);
+}
+
+// ---------------------------------------------------------------------------
+// handleFirmwareTrigger  –  POST /fw-update-trigger
+//   Re-validates eligibility then calls fw_manager->startUpdate().
+// ---------------------------------------------------------------------------
+MHD_Result HttpsServer::handleFirmwareTrigger(struct MHD_Connection* connection,
+                                               ConnectionInfo* con_info,
+                                               const char* upload_data,
+                                               size_t* upload_data_size)
+{
+    if (*upload_data_size > 0) { *upload_data_size = 0; return MHD_YES; }
+
+    if (!s_blockchain || !fw_manager) {
+        return sendResponse(connection,
+            "<html><body><h1>Error</h1><p>Blockchain or firmware manager not available.</p>"
+            "<p><a href='/fw-check'>Back</a></p></body></html>",
+            MHD_HTTP_SERVICE_UNAVAILABLE);
+    }
+
+    std::string fw_contract_addr, fw_hsm_pubkey = "/etc/googlehsmkey/hsm-pubkey.pem";
+    std::string ca_cert = "/etc/ssl/certs/ca-certificates.crt";
+    std::string staging = "/tmp/iot-gateway.staging", target = "/usr/bin/iot-gateway";
+    std::string backup  = "/usr/bin/iot-gateway.bak";
+
+    std::ifstream conf("/etc/iot-gateway/firmware.conf");
+    if (conf.is_open()) {
+        std::string ln;
+        while (std::getline(conf, ln)) {
+            if (ln.empty() || ln[0] == '#') continue;
+            auto eq = ln.find('=');
+            if (eq == std::string::npos) continue;
+            std::string k = ln.substr(0, eq), v = ln.substr(eq + 1);
+            while (!v.empty() && (v.back() == ' ' || v.back() == '\r' || v.back() == '\t')) v.pop_back();
+            if      (k == "FIRMWARE_CONTRACT")   fw_contract_addr = v;
+            else if (k == "FIRMWARE_HSM_PUBKEY") fw_hsm_pubkey    = v;
+            else if (k == "FIRMWARE_CA_CERT")    ca_cert          = v;
+            else if (k == "FIRMWARE_STAGING")    staging          = v;
+            else if (k == "FIRMWARE_TARGET")     target           = v;
+            else if (k == "FIRMWARE_BACKUP")     backup           = v;
+        }
+    }
+
+    if (fw_contract_addr.empty()) {
+        return sendResponse(connection,
+            "<html><body><h1>Error</h1><p>FIRMWARE_CONTRACT not configured.</p>"
+            "<p><a href='/fw-check'>Back</a></p></body></html>",
+            MHD_HTTP_BAD_REQUEST);
+    }
+
+    // Re-query blockchain to prevent stale data from the GET check page
+    FirmwareInfo info = s_blockchain->readLatestFirmwareMetadata(fw_contract_addr);
+    if (!info.error.empty()) {
+        return sendResponse(connection,
+            "<html><body><h1>Error</h1><p>Blockchain query failed: " + info.error + "</p>"
+            "<p><a href='/fw-check'>Back</a></p></body></html>",
+            MHD_HTTP_SERVICE_UNAVAILABLE);
+    }
+
+    if (info.approval_stage < ApprovalStage::OEM_APPROVED) {
+        return sendResponse(connection,
+            "<html><body><h1>Blocked</h1><p>Firmware not approved by OEM. Stage: "
+            + std::string(approvalStageLabel(info.approval_stage)) + "</p>"
+            "<p><a href='/fw-check'>Back</a></p></body></html>",
+            MHD_HTTP_FORBIDDEN);
+    }
+
+    std::string bc_hash_hex = info.firmware_hash;
+    if (bc_hash_hex.size() > 7 && bc_hash_hex.substr(0, 7) == "sha256:")
+        bc_hash_hex = bc_hash_hex.substr(7);
+
+    FirmwareUpdateConfig cfg;
+    cfg.url             = info.download_url;
+    cfg.version         = info.firmware_version;
+    cfg.expected_sha256 = bc_hash_hex;
+    cfg.ca_cert_path    = ca_cert;
+    cfg.staging_path    = staging;
+    cfg.target_path     = target;
+    cfg.backup_path     = backup;
+    cfg.hsm_pubkey_path = fw_hsm_pubkey;
+    cfg.hsm_sig_url     = info.download_url + ".sig";
+
+    bool started = fw_manager->startUpdate(cfg);
+    if (!started) {
+        return sendResponse(connection,
+            "<html><body><h1>Update Not Started</h1>"
+            "<p>" + fw_manager->getLastError() + "</p>"
+            "<p><a href='/fw-check'>Back</a></p></body></html>",
+            MHD_HTTP_CONFLICT);
+    }
+
+    addActivityLog("[FIRMWARE] OTA triggered via dashboard → " + info.firmware_version +
+                   " approval=" + approvalStageLabel(info.approval_stage));
+    return sendResponse(connection,
+        "<!DOCTYPE html><html><body style='font-family:Arial;padding:24px;'>"
+        "<h1>&#128197; Firmware Update Started</h1>"
+        "<p>Downloading and verifying firmware <strong>" + info.firmware_version + "</strong>.</p>"
+        "<p>Steps: download → Google HSM signature verify → LDR header validate → SHA-256 check → atomic install.</p>"
+        "<p>The device will reboot automatically once the update is applied.</p>"
+        "<p><a href='/status'>&#128202; View System Status</a></p>"
+        "</body></html>",
+        MHD_HTTP_OK);
 }
 
 // Handle LED control request
@@ -1783,6 +2139,11 @@ MHD_Result HttpsServer::answerToConnection(void* cls, struct MHD_Connection* con
         return handleOtpPost(connection, con_info, upload_data, upload_data_size);
     }
 
+    // Handle POST /fw-update-trigger
+    if (std::strcmp(method, "POST") == 0 && std::strcmp(url, "/fw-update-trigger") == 0) {
+        return handleFirmwareTrigger(connection, con_info, upload_data, upload_data_size);
+    }
+
     // Handle GET or other methods
     if (std::strcmp(method, "GET") == 0) {
         std::cout << "Handling GET request for URL: " << url << std::endl;
@@ -1791,6 +2152,11 @@ MHD_Result HttpsServer::answerToConnection(void* cls, struct MHD_Connection* con
         if (std::strcmp(url, "/startledblink") == 0 || 
             std::strncmp(url, "/startledblink?", 15) == 0) {
             return handleLedControl(connection, url);
+        }
+
+        // Firmware update check endpoint
+        if (std::strcmp(url, "/fw-check") == 0) {
+            return handleFirmwareCheck(connection);
         }
         
         // Default GET handler

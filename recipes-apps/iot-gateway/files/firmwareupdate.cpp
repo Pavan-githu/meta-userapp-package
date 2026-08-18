@@ -13,6 +13,8 @@
 #include <curl/curl.h>
 #include <openssl/evp.h>
 #include <openssl/err.h>
+#include <openssl/pem.h>
+#include <vector>
 
 // ---------------------------------------------------------------------------
 // crc32Compute  –  CRC-32/ISO-HDLC (poly 0xEDB88320, init 0xFFFFFFFF,
@@ -294,6 +296,24 @@ void* FirmwareUpdateManager::updateThreadEntry(void* arg)
         fail("Update cancelled by caller");
     }
 
+    // Step 1.5: HSM signature verification — blocks install if signature is invalid
+    if (!cfg.hsm_sig_url.empty() && !cfg.hsm_pubkey_path.empty()) {
+        const std::string sig_staging = cfg.staging_path + ".hsmsig";
+        std::string dl_err;
+        std::cout << "[FirmwareUpdate] Downloading HSM signature from " << cfg.hsm_sig_url << std::endl;
+        if (!FirmwareUpdateManager::downloadUrlToFile(
+                cfg.hsm_sig_url, sig_staging, cfg.ca_cert_path, dl_err)) {
+            std::remove(sig_staging.c_str());
+            fail("HSM signature download failed: " + dl_err);
+        }
+        std::string hsm_err;
+        bool hsm_ok = FirmwareUpdateManager::verifyHsmSignature(
+            cfg.staging_path, sig_staging, cfg.hsm_pubkey_path, hsm_err);
+        std::remove(sig_staging.c_str());
+        if (!hsm_ok)
+            fail(hsm_err);
+    }
+
     // Step 1b: For .ldr firmware images, validate the binary header.
     //          The authoritative payload SHA-256 is read from the header
     //          and replaces any externally supplied expected_sha256.
@@ -390,6 +410,118 @@ bool FirmwareUpdateManager::downloadFirmware(const FirmwareUpdateConfig& cfg)
     }
 
     std::cout << "[FirmwareUpdate] Download complete: " << cfg.staging_path << std::endl;
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// verifyHsmSignature  –  EVP_DigestVerify over the firmware file using the
+//                        Google Cloud HSM RSA-PSS or ECDSA-P256 public key.
+// ---------------------------------------------------------------------------
+bool FirmwareUpdateManager::verifyHsmSignature(const std::string& firmware_path,
+                                                const std::string& sig_path,
+                                                const std::string& pubkey_path,
+                                                std::string&       error_out)
+{
+    // Load HSM public key from PEM (exported from Google Cloud KMS)
+    FILE* kfp = fopen(pubkey_path.c_str(), "r");
+    if (!kfp) { error_out = "Cannot open HSM public key: " + pubkey_path; return false; }
+    EVP_PKEY* pkey = PEM_read_PUBKEY(kfp, nullptr, nullptr, nullptr);
+    fclose(kfp);
+    if (!pkey) {
+        error_out = "Failed to parse HSM public key from: " + pubkey_path;
+        return false;
+    }
+
+    // Read detached signature file (binary, max 1 KiB – RSA-4096 = 512 bytes)
+    FILE* sfp = fopen(sig_path.c_str(), "rb");
+    if (!sfp) {
+        EVP_PKEY_free(pkey);
+        error_out = "Cannot open signature file: " + sig_path;
+        return false;
+    }
+    fseek(sfp, 0, SEEK_END);
+    long sig_len = ftell(sfp);
+    fseek(sfp, 0, SEEK_SET);
+    if (sig_len <= 0 || sig_len > 4096) {
+        fclose(sfp);
+        EVP_PKEY_free(pkey);
+        error_out = "Signature file has unexpected size: " + std::to_string(sig_len);
+        return false;
+    }
+    std::vector<uint8_t> sig(static_cast<size_t>(sig_len));
+    fread(sig.data(), 1, static_cast<size_t>(sig_len), sfp);
+    fclose(sfp);
+
+    // Stream firmware file through EVP_DigestVerify (SHA-256, RSA-PSS or ECDSA)
+    EVP_MD_CTX* ctx = EVP_MD_CTX_new();
+    if (!ctx) { EVP_PKEY_free(pkey); error_out = "EVP_MD_CTX_new() failed"; return false; }
+
+    if (EVP_DigestVerifyInit(ctx, nullptr, EVP_sha256(), nullptr, pkey) != 1) {
+        EVP_MD_CTX_free(ctx); EVP_PKEY_free(pkey);
+        error_out = "EVP_DigestVerifyInit failed";
+        return false;
+    }
+
+    FILE* ffp = fopen(firmware_path.c_str(), "rb");
+    if (!ffp) {
+        EVP_MD_CTX_free(ctx); EVP_PKEY_free(pkey);
+        error_out = "Cannot open firmware for HSM verification: " + firmware_path;
+        return false;
+    }
+    uint8_t buf[65536];
+    size_t  n;
+    while ((n = fread(buf, 1, sizeof(buf), ffp)) > 0)
+        EVP_DigestVerifyUpdate(ctx, buf, n);
+    fclose(ffp);
+
+    int ok = EVP_DigestVerifyFinal(ctx, sig.data(), sig.size());
+    EVP_MD_CTX_free(ctx);
+    EVP_PKEY_free(pkey);
+
+    if (ok != 1) {
+        error_out = "HSM signature INVALID — firmware rejected as inauthentic";
+        return false;
+    }
+    std::cout << "[FirmwareUpdate] HSM signature verified OK (Google Cloud HSM)" << std::endl;
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// downloadUrlToFile  –  minimal CURL download for small companion files (.sig)
+// ---------------------------------------------------------------------------
+bool FirmwareUpdateManager::downloadUrlToFile(const std::string& url,
+                                               const std::string& dest_path,
+                                               const std::string& ca_cert_path,
+                                               std::string&       error_out)
+{
+    FILE* fp = std::fopen(dest_path.c_str(), "wb");
+    if (!fp) {
+        error_out = "Cannot create: " + dest_path + " (" + strerror(errno) + ")";
+        return false;
+    }
+    CURL* curl = curl_easy_init();
+    if (!curl) { std::fclose(fp); error_out = "curl_easy_init() failed"; return false; }
+
+    curl_easy_setopt(curl, CURLOPT_URL,            url.c_str());
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION,  curlWriteCallback);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA,      fp);
+    curl_easy_setopt(curl, CURLOPT_CAINFO,         ca_cert_path.c_str());
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(curl, CURLOPT_MAXREDIRS,      5L);
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 10L);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT,        30L);  // .sig files are small
+
+    CURLcode res = curl_easy_perform(curl);
+    std::fclose(fp);
+    curl_easy_cleanup(curl);
+
+    if (res != CURLE_OK) {
+        std::remove(dest_path.c_str());
+        error_out = std::string("CURL error: ") + curl_easy_strerror(res);
+        return false;
+    }
     return true;
 }
 

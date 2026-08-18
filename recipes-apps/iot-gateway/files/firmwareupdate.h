@@ -60,6 +60,9 @@ struct FirmwareUpdateConfig {
     std::string target_path;     // final installation path, e.g. /usr/bin/iot-gateway
     std::string backup_path;     // path for the previous binary (rollback)
     std::string version;         // version string of the new firmware (e.g. "1.2.3")
+    // HSM signature verification (optional — leave empty to skip)
+    std::string hsm_pubkey_path; // path to Google HSM RSA/EC public key PEM on device
+    std::string hsm_sig_url;     // HTTPS URL of the detached .sig file from the release server
 };
 
 // ---------------------------------------------------------------------------
@@ -183,6 +186,19 @@ private:
     void setError(const std::string& msg);
     bool isHttpsUrl(const std::string& url) const;
     static bool isLdrFile(const std::string& path);
+
+    // Verify RSA/ECDSA signature produced by Google Cloud HSM over the firmware file.
+    // Uses EVP_DigestVerify with SHA-256; works for both RSA-PSS and ECDSA-P256 keys.
+    static bool verifyHsmSignature(const std::string& firmware_path,
+                                    const std::string& sig_path,
+                                    const std::string& pubkey_path,
+                                    std::string&       error_out);
+
+    // Minimal HTTPS download of a small file (e.g. .sig) into dest_path.
+    static bool downloadUrlToFile(const std::string& url,
+                                   const std::string& dest_path,
+                                   const std::string& ca_cert_path,
+                                   std::string&       error_out);
 
     // -----------------------------------------------------------------------
     // Member state

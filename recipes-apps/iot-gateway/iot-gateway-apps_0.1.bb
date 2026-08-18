@@ -74,6 +74,10 @@ do_install() {
 
     # Install user registry directory (mode 700 – root only)
     install -d -m 0700 ${D}${sysconfdir}/iot-gateway
+
+    # Provision /etc/googlehsmkey with restricted permissions;
+    # deploy the Google Cloud HSM public key here via SSH after first boot.
+    install -d -m 0700 ${D}${sysconfdir}/googlehsmkey
     
     # Install systemd service
     install -d ${D}${systemd_system_unitdir}
@@ -91,6 +95,7 @@ do_install() {
 FILES:${PN} += "${bindir}/iot-gateway"
 FILES:${PN} += "${sysconfdir}/https-server"
 FILES:${PN} += "${sysconfdir}/iot-gateway"
+FILES:${PN} += "${sysconfdir}/googlehsmkey"
 FILES:${PN} += "${sysconfdir}/iot-gateway-version"
 FILES:${PN} += "${systemd_system_unitdir}/iot-gateway.service"
 FILES:${PN} += "${datadir}/iot-gateway"

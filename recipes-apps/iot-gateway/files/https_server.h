@@ -186,6 +186,15 @@ private:
                                     const char* upload_data,
                                     size_t* upload_data_size);
 
+    // GET /fw-check  — queries blockchain metadata, compares hash/version/approval
+    static MHD_Result handleFirmwareCheck(struct MHD_Connection* connection);
+
+    // POST /fw-update-trigger  — validates eligibility then calls fw_manager->startUpdate()
+    static MHD_Result handleFirmwareTrigger(struct MHD_Connection* connection,
+                                             ConnectionInfo* con_info,
+                                             const char* upload_data,
+                                             size_t* upload_data_size);
+
     static MHD_Result sendResponse(struct MHD_Connection* connection, 
                                    const std::string& content, 
                                    int status_code);
