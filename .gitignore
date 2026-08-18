@@ -20,3 +20,6 @@ Thumbs.db
 .vscode/
 .idea/
 *.sublime-*
+
+# Graphify output (not part of the project source)
+graphify-out/
