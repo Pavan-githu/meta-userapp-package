@@ -152,14 +152,18 @@ bool FirmwareUpdateManager::verifyLdrHeader(const std::string& ldr_path,
     }
 
     // ── 7. payload_size consistent with actual file size ──────────────────
-    const uint64_t expected_total =
-        static_cast<uint64_t>(LDR_HDR_SIZE) + hdr.payload_size;
-    if (static_cast<uint64_t>(file_size) != expected_total) {
+    //  Accept both bare ( header + payload ) and RPIS-tailed
+    //  ( header + payload + RPIS_TAIL_SIZE ) variants.
+    const uint64_t base_total  = static_cast<uint64_t>(LDR_HDR_SIZE) + hdr.payload_size;
+    const uint64_t tail_total  = base_total + RPIS_TAIL_SIZE;
+    const uint64_t actual_size = static_cast<uint64_t>(file_size);
+    if (actual_size != base_total && actual_size != tail_total) {
         error_out = "File size mismatch: header declares payload of "
                     + std::to_string(hdr.payload_size)
-                    + " bytes (total " + std::to_string(expected_total)
+                    + " bytes (expected file size " + std::to_string(base_total)
+                    + " or " + std::to_string(tail_total)
                     + "), but actual file is "
-                    + std::to_string(static_cast<uint64_t>(file_size)) + " bytes";
+                    + std::to_string(actual_size) + " bytes";
         return false;
     }
 
@@ -296,27 +300,8 @@ void* FirmwareUpdateManager::updateThreadEntry(void* arg)
         fail("Update cancelled by caller");
     }
 
-    // Step 1.5: HSM signature verification — blocks install if signature is invalid
-    if (!cfg.hsm_sig_url.empty() && !cfg.hsm_pubkey_path.empty()) {
-        const std::string sig_staging = cfg.staging_path + ".hsmsig";
-        std::string dl_err;
-        std::cout << "[FirmwareUpdate] Downloading HSM signature from " << cfg.hsm_sig_url << std::endl;
-        if (!FirmwareUpdateManager::downloadUrlToFile(
-                cfg.hsm_sig_url, sig_staging, cfg.ca_cert_path, dl_err)) {
-            std::remove(sig_staging.c_str());
-            fail("HSM signature download failed: " + dl_err);
-        }
-        std::string hsm_err;
-        bool hsm_ok = FirmwareUpdateManager::verifyHsmSignature(
-            cfg.staging_path, sig_staging, cfg.hsm_pubkey_path, hsm_err);
-        std::remove(sig_staging.c_str());
-        if (!hsm_ok)
-            fail(hsm_err);
-    }
-
-    // Step 1b: For .ldr firmware images, validate the binary header.
-    //          The authoritative payload SHA-256 is read from the header
-    //          and replaces any externally supplied expected_sha256.
+    // Step 1b: For .ldr firmware images, validate the binary header first
+    //          so that payload_size is known before HSM verification.
     if (self->isLdrFile(cfg.staging_path)) {
         FirmwareHeader hdr;
         std::string    hdr_err;
@@ -324,7 +309,7 @@ void* FirmwareUpdateManager::updateThreadEntry(void* arg)
             fail(std::string("LDR header validation failed: ") + hdr_err);
         self->m_ldr_header    = hdr;
         self->m_is_ldr_update = true;
-        // Convert raw 32-byte digest to lowercase hex for verifySha256
+        // Override expected_sha256 with the authoritative digest from the header
         std::ostringstream hex;
         hex << std::hex;
         for (int i = 0; i < 32; ++i) {
@@ -332,6 +317,17 @@ void* FirmwareUpdateManager::updateThreadEntry(void* arg)
             hex << static_cast<unsigned int>(hdr.sha256[i]);
         }
         cfg.expected_sha256 = hex.str();
+    }
+
+    // Step 1.5: Verify Google Cloud HSM signature embedded in the 264-byte RPIS
+    //           tail of the .ldr file (bytes after the .raucb payload).
+    if (self->m_is_ldr_update && !cfg.hsm_pubkey_path.empty()) {
+        std::string hsm_err;
+        bool hsm_ok = FirmwareUpdateManager::verifyHsmSignatureFromLdr(
+            cfg.staging_path, cfg.hsm_pubkey_path,
+            self->m_ldr_header.payload_size, hsm_err);
+        if (!hsm_ok)
+            fail(hsm_err);
     }
 
     // Step 2: Verify
@@ -526,6 +522,110 @@ bool FirmwareUpdateManager::downloadUrlToFile(const std::string& url,
 }
 
 // ---------------------------------------------------------------------------
+// verifyHsmSignatureFromLdr  –  extract the RSA/ECDSA signature from the
+//   264-byte RPIS tail appended to the .ldr file and verify it against the
+//   .raucb payload (bytes LDR_HDR_SIZE .. LDR_HDR_SIZE+payload_size-1).
+//
+//   RPIS tail layout (264 bytes, little-endian):
+//     [0:4]   magic "RPIS"
+//     [4:6]   uint16_t: signature length in bytes
+//     [6:8]   uint16_t: reserved (0)
+//     [8:264] signature bytes (padded to 256 bytes)
+// ---------------------------------------------------------------------------
+bool FirmwareUpdateManager::verifyHsmSignatureFromLdr(const std::string& ldr_path,
+                                                       const std::string& pubkey_path,
+                                                       uint64_t           payload_size,
+                                                       std::string&       error_out)
+{
+    // ── Read the RPIS tail from the end of the file ───────────────────────
+    std::ifstream ldr(ldr_path, std::ios::binary | std::ios::ate);
+    if (!ldr.is_open()) {
+        error_out = "Cannot open .ldr for RPIS tail read: " + ldr_path;
+        return false;
+    }
+    const std::streamoff file_size = ldr.tellg();
+    if (file_size < static_cast<std::streamoff>(LDR_HDR_SIZE + payload_size + RPIS_TAIL_SIZE)) {
+        error_out = "File too small to contain RPIS tail: " + ldr_path;
+        return false;
+    }
+
+    // Seek to start of RPIS tail
+    ldr.seekg(-static_cast<std::streamoff>(RPIS_TAIL_SIZE), std::ios::end);
+    uint8_t tail[RPIS_TAIL_SIZE];
+    if (!ldr.read(reinterpret_cast<char*>(tail), RPIS_TAIL_SIZE)) {
+        error_out = "Failed to read RPIS tail from: " + ldr_path;
+        return false;
+    }
+    ldr.close();
+
+    // ── Validate magic ────────────────────────────────────────────────────
+    if (std::memcmp(tail, RPIS_MAGIC, sizeof(RPIS_MAGIC)) != 0) {
+        error_out = std::string("RPIS magic mismatch — expected 'RPIS', got '")
+                    + static_cast<char>(tail[0]) + static_cast<char>(tail[1])
+                    + static_cast<char>(tail[2]) + static_cast<char>(tail[3]) + "'";
+        return false;
+    }
+
+    // ── Extract signature length and bytes ───────────────────────────────
+    uint16_t sig_len = 0;
+    std::memcpy(&sig_len, tail + 4, sizeof(sig_len));  // little-endian
+    if (sig_len == 0 || sig_len > RPIS_SIG_MAX) {
+        error_out = "RPIS sig_len invalid: " + std::to_string(sig_len);
+        return false;
+    }
+    const uint8_t* sig_bytes = tail + RPIS_SIG_OFFSET;
+
+    // ── Load HSM public key ──────────────────────────────────────────────
+    FILE* kfp = fopen(pubkey_path.c_str(), "r");
+    if (!kfp) { error_out = "Cannot open HSM public key: " + pubkey_path; return false; }
+    EVP_PKEY* pkey = PEM_read_PUBKEY(kfp, nullptr, nullptr, nullptr);
+    fclose(kfp);
+    if (!pkey) { error_out = "Failed to parse HSM public key: " + pubkey_path; return false; }
+
+    // ── Verify signature over the payload region only ────────────────────
+    EVP_MD_CTX* ctx = EVP_MD_CTX_new();
+    if (!ctx) { EVP_PKEY_free(pkey); error_out = "EVP_MD_CTX_new() failed"; return false; }
+
+    if (EVP_DigestVerifyInit(ctx, nullptr, EVP_sha256(), nullptr, pkey) != 1) {
+        EVP_MD_CTX_free(ctx); EVP_PKEY_free(pkey);
+        error_out = "EVP_DigestVerifyInit failed"; return false;
+    }
+
+    // Stream exactly payload_size bytes starting at LDR_HDR_SIZE
+    std::ifstream pfs(ldr_path, std::ios::binary);
+    if (!pfs.is_open()) {
+        EVP_MD_CTX_free(ctx); EVP_PKEY_free(pkey);
+        error_out = "Cannot open .ldr for payload verification: " + ldr_path;
+        return false;
+    }
+    pfs.seekg(LDR_HDR_SIZE, std::ios::beg);
+    uint64_t remaining = payload_size;
+    uint8_t  pbuf[65536];
+    while (remaining > 0) {
+        size_t chunk = static_cast<size_t>(std::min((uint64_t)sizeof(pbuf), remaining));
+        pfs.read(reinterpret_cast<char*>(pbuf), chunk);
+        size_t n = static_cast<size_t>(pfs.gcount());
+        if (n == 0) break;
+        EVP_DigestVerifyUpdate(ctx, pbuf, n);
+        remaining -= n;
+    }
+    pfs.close();
+
+    int ok = EVP_DigestVerifyFinal(ctx,
+                                    sig_bytes,
+                                    static_cast<size_t>(sig_len));
+    EVP_MD_CTX_free(ctx);
+    EVP_PKEY_free(pkey);
+
+    if (ok != 1) {
+        error_out = "RPIS HSM signature INVALID — .ldr payload not authentic";
+        return false;
+    }
+    std::cout << "[FirmwareUpdate] RPIS HSM signature verified OK (Google Cloud HSM)" << std::endl;
+    return true;
+}
+
+// ---------------------------------------------------------------------------
 // verifySha256  –  compute SHA-256 of staging file and compare to expected
 // ---------------------------------------------------------------------------
 bool FirmwareUpdateManager::verifySha256(const FirmwareUpdateConfig& cfg)
@@ -539,13 +639,16 @@ bool FirmwareUpdateManager::verifySha256(const FirmwareUpdateConfig& cfg)
         return false;
     }
 
-    // For .ldr images the SHA-256 covers only the payload (bytes LDR_HDR_SIZE..end)
+    // For .ldr images the SHA-256 covers only the payload region
+    // (bytes LDR_HDR_SIZE .. LDR_HDR_SIZE+payload_size-1), not the RPIS tail.
+    uint64_t bytes_remaining = UINT64_MAX;  // read to EOF for plain binaries
     if (m_is_ldr_update) {
         ifs.seekg(LDR_HDR_SIZE, std::ios::beg);
         if (!ifs) {
             setError("Failed to seek past .ldr header in: " + cfg.staging_path);
             return false;
         }
+        bytes_remaining = m_ldr_header.payload_size;
     }
 
     // Compute digest incrementally
@@ -563,8 +666,11 @@ bool FirmwareUpdateManager::verifySha256(const FirmwareUpdateConfig& cfg)
 
     const size_t BUF_SIZE = 65536;
     char buf[BUF_SIZE];
-    while (ifs.read(buf, BUF_SIZE) || ifs.gcount() > 0) {
-        if (EVP_DigestUpdate(ctx, buf, static_cast<size_t>(ifs.gcount())) != 1) {
+    while (bytes_remaining > 0 && (ifs.read(buf, std::min((size_t)BUF_SIZE, (size_t)bytes_remaining)) || ifs.gcount() > 0)) {
+        size_t n = static_cast<size_t>(ifs.gcount());
+        if (n == 0) break;
+        bytes_remaining -= (bytes_remaining == UINT64_MAX ? 0 : n);
+        if (EVP_DigestUpdate(ctx, buf, n) != 1) {
             EVP_MD_CTX_free(ctx);
             setError("EVP_DigestUpdate failed");
             return false;
@@ -625,7 +731,17 @@ bool FirmwareUpdateManager::applyUpdate(const FirmwareUpdateConfig& cfg)
                 return false;
             }
             src.seekg(LDR_HDR_SIZE, std::ios::beg);
-            dst << src.rdbuf();
+            // Extract exactly payload_size bytes — stop before the RPIS tail
+            uint64_t remaining = m_ldr_header.payload_size;
+            char copy_buf[65536];
+            while (remaining > 0) {
+                size_t chunk = static_cast<size_t>(std::min((uint64_t)sizeof(copy_buf), remaining));
+                src.read(copy_buf, chunk);
+                size_t n = static_cast<size_t>(src.gcount());
+                if (n == 0) break;
+                dst.write(copy_buf, n);
+                remaining -= n;
+            }
         }
         std::remove(cfg.staging_path.c_str());
         if (std::rename(raw_path.c_str(), cfg.staging_path.c_str()) != 0) {
@@ -636,7 +752,25 @@ bool FirmwareUpdateManager::applyUpdate(const FirmwareUpdateConfig& cfg)
                   << m_ldr_header.payload_size << " bytes)" << std::endl;
     }
 
-    // Backup existing binary if it exists
+    // For .ldr updates the staging file is now a pure .raucb bundle.
+    // Hand it to the RAUC daemon which writes it to the inactive A/B slot,
+    // updates the U-Boot boot counter, and marks the slot for next boot.
+    if (m_is_ldr_update) {
+        std::string cmd = "rauc install " + cfg.staging_path;
+        std::cout << "[FirmwareUpdate] Running: " << cmd << std::endl;
+        int ret = std::system(cmd.c_str());
+        std::remove(cfg.staging_path.c_str());
+        if (ret != 0) {
+            setError("rauc install failed (exit " + std::to_string(ret) +
+                     ") — inactive slot not written");
+            return false;
+        }
+        std::cout << "[FirmwareUpdate] rauc install succeeded. "
+                     "Device will boot new slot on next reboot." << std::endl;
+        return true;
+    }
+
+    // ── Plain binary path (non-LDR) ───────────────────────────────────────
     if (!cfg.backup_path.empty()) {
         struct stat st;
         if (stat(cfg.target_path.c_str(), &st) == 0) {

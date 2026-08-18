@@ -78,6 +78,12 @@ static constexpr uint8_t  LDR_MAGIC[4]    = {'R', 'P', 'I', 'F'};
 static constexpr uint16_t LDR_HDR_VERSION = 1;
 static constexpr uint16_t LDR_HDR_SIZE    = 116;  // sizeof(FirmwareHeader)
 
+// RPIS tail appended after the .raucb payload: magic(4) + sig_len(2) + reserved(2) + sig(256)
+static constexpr uint8_t  RPIS_MAGIC[4]   = {'R', 'P', 'I', 'S'};
+static constexpr uint16_t RPIS_TAIL_SIZE  = 264;   // total bytes of the RPIS tail
+static constexpr uint16_t RPIS_SIG_OFFSET =   8;   // bytes before signature data within tail
+static constexpr uint16_t RPIS_SIG_MAX    = RPIS_TAIL_SIZE - RPIS_SIG_OFFSET;  // 256
+
 typedef struct __attribute__((packed)) {
     uint8_t  magic[4];        /* "RPIF"                              */
     uint16_t hdr_version;     /* must be 1                           */
@@ -168,6 +174,13 @@ public:
     static bool verifyLdrHeader(const std::string& ldr_path,
                                 FirmwareHeader&    header_out,
                                 std::string&       error_out);
+
+    // Verify the Google Cloud HSM signature embedded in the 264-byte RPIS tail
+    // appended after the .raucb payload.  payload_size is from the RPIF header.
+    static bool verifyHsmSignatureFromLdr(const std::string& ldr_path,
+                                           const std::string& pubkey_path,
+                                           uint64_t           payload_size,
+                                           std::string&       error_out);
 
 private:
     // Background thread entry point
