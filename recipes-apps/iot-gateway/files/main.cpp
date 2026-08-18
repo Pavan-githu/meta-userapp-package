@@ -6,6 +6,7 @@
 #include "firmwareupdate.h"
 #include <iostream>
 #include <fstream>
+#include <sstream>
 #include <pthread.h>
 #include <csignal>
 #include <cstdlib>
