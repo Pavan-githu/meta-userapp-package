@@ -1661,6 +1661,7 @@ MHD_Result HttpsServer::handleFirmwareCheck(struct MHD_Connection* connection)
             "<div class='blocked-notice'>"
             "<strong style='font-size:1.1em;'>&#128683; Download &amp; Install: NOT ALLOWED</strong><br/><br/>"
             "Blockchain query failed: " + info.error +
+            " <strong>Deploy the FirmwareMetadataStore contract on the connected RPC chain and register at least one firmware release before OTA can proceed.</strong>"
             "</div>"
             "<a href='/fw-check' class='btn btn-back'>&#8635; Retry</a>"
             "</body></html>";

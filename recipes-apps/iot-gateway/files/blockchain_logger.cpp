@@ -625,8 +625,10 @@ FirmwareInfo BlockchainLogger::abiDecodeFirmwareResult(const std::string& result
 {
     FirmwareInfo info;
 
-    if (result_hex.empty() || result_hex == "0x") {
-        info.error = "Empty result from contract — version may not be registered.";
+    if (result_hex.empty() || result_hex == "0x" || result_hex == "0x0") {
+        info.error = "No firmware metadata returned for this contract address. "
+                     "The contract may not be deployed on the connected chain, "
+                     "or no firmware version has been registered yet.";
         return info;
     }
 
