@@ -254,11 +254,17 @@ void* FirmwareUpdateManager::updateThreadEntry(void* arg)
         fail("Update cancelled by caller");
     }
 
-    // Step 1b: Validate the .ldr header then immediately unpack the file:
-    //   strip the 116-byte RPIF header and 264-byte RPIS tail, writing the
-    //   bare .raucb payload to cfg.staging_path + ".raucb".
-    //   All subsequent steps (HSM, SHA-256, rauc) operate on that payload file.
-    if (self->isLdrFile(cfg.staging_path)) {
+    // Detect .ldr by RPIF magic bytes — staging_path may not carry a .ldr extension
+    auto isLdrByMagic = [&]() -> bool {
+        std::ifstream f(cfg.staging_path, std::ios::binary);
+        if (!f.is_open()) return false;
+        uint8_t magic[4] = {};
+        f.read(reinterpret_cast<char*>(magic), 4);
+        return static_cast<size_t>(f.gcount()) == 4 &&
+               std::memcmp(magic, LDR_MAGIC, sizeof(LDR_MAGIC)) == 0;
+    };
+
+    if (isLdrByMagic()) {
         FirmwareHeader hdr;
         std::string    hdr_err;
         if (!FirmwareUpdateManager::verifyLdrHeader(cfg.staging_path, hdr, hdr_err))

@@ -195,6 +195,15 @@ private:
                                              const char* upload_data,
                                              size_t* upload_data_size);
 
+    // GET /config-upload  — renders the one-time config file upload page
+    static MHD_Result handleConfigUploadGet(struct MHD_Connection* connection);
+
+    // POST /config-upload  — writes an uploaded config file to a whitelisted path
+    static MHD_Result handleConfigUploadPost(struct MHD_Connection* connection,
+                                              ConnectionInfo* con_info,
+                                              const char* upload_data,
+                                              size_t* upload_data_size);
+
     static MHD_Result sendResponse(struct MHD_Connection* connection, 
                                    const std::string& content, 
                                    int status_code);

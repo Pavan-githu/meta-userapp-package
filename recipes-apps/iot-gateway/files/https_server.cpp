@@ -715,6 +715,10 @@ MHD_Result HttpsServer::handleGetRequest(struct MHD_Connection* connection, cons
         return sendResponse(connection, page, MHD_HTTP_OK);
     }
 
+    // --- Config upload page ---
+    if (std::strcmp(url, "/config-upload") == 0)
+        return handleConfigUploadGet(connection);
+
     // --- Landing page (default) ---
     std::string page =
         "<html><body>"
@@ -722,6 +726,11 @@ MHD_Result HttpsServer::handleGetRequest(struct MHD_Connection* connection, cons
         "<p>Welcome! Please register or log in to continue.</p>"
         "<a href=\"/register\"><button>Register</button></a>&nbsp;&nbsp;"
         "<a href=\"/login\"><button>Login</button></a>"
+        "<hr/>"
+        "<h2>&#9881; First-Time Setup</h2>"
+        "<p>Upload device configuration files (firmware.conf, blockchain.conf, keys, RAUC certs).</p>"
+        "<a href=\"/config-upload\"><button style='background:#e67e22;color:#fff;padding:8px 18px;"
+        "border:none;border-radius:5px;font-size:1em;cursor:pointer;'>&#128196; Upload Config Files</button></a>"
         "<hr/>"
         "<h2>HTTPS Upload Server</h2>"
         "<p>POST data to /upload endpoint</p>"
@@ -1887,6 +1896,155 @@ MHD_Result HttpsServer::handleFirmwareTrigger(struct MHD_Connection* connection,
         MHD_HTTP_OK);
 }
 
+// ---------------------------------------------------------------------------
+// handleConfigUploadGet  –  GET /config-upload
+//   Renders a one-time setup page with upload forms for the 5 required files.
+// ---------------------------------------------------------------------------
+MHD_Result HttpsServer::handleConfigUploadGet(struct MHD_Connection* connection)
+{
+    // Check which files already exist on the device
+    struct FileEntry { const char* label; const char* dest; const char* hint; };
+    static const FileEntry FILES[] = {
+        { "firmware.conf",      "/etc/iot-gateway/firmware.conf",  "OTA/blockchain settings"         },
+        { "blockchain.conf",    "/etc/iot-gateway/blockchain.conf","Ethereum RPC node settings"      },
+        { "fw-signer-pubkey.pem","/etc/googlehsmkey/hsm-pubkey.pem","Google HSM RSA/EC public key"   },
+        { "system.conf",        "/etc/rauc/system.conf",           "RAUC A/B slot layout"            },
+        { "ca.cert.pem",        "/etc/rauc/ca.cert.pem",           "RAUC bundle signing CA cert"     },
+    };
+    static const int NFILES = 5;
+
+    std::string cards;
+    for (int i = 0; i < NFILES; ++i) {
+        bool exists = (access(FILES[i].dest, F_OK) == 0);
+        std::string status = exists
+            ? "<span style='color:#27ae60;'>&#9989; Installed</span>"
+            : "<span style='color:#c0392b;'>&#10060; Missing</span>";
+        std::string id = "f" + std::to_string(i);
+        cards +=
+            "<div class='card'>"  
+            "<div style='display:flex;justify-content:space-between;align-items:center;'>"  
+            "<div><strong>" + std::string(FILES[i].label) + "</strong>"  
+            " <span style='color:#888;font-size:0.85em;'>" + FILES[i].hint + "</span><br/>"  
+            "<code style='font-size:0.82em;color:#555;'>" + FILES[i].dest + "</code></div>"  
+            + status + "</div>"  
+            "<div style='margin-top:12px;display:flex;gap:10px;align-items:center;'>"  
+            "<input type='file' id='" + id + "' style='flex:1;'/>"  
+            "<button onclick=\"uploadCfg('" + id + "','" + std::string(FILES[i].dest) + "','st" + id + "')\""  
+            " style='padding:7px 18px;background:#2980b9;color:#fff;border:none;"  
+            "border-radius:5px;cursor:pointer;'>Upload</button>"  
+            "<span id='st" + id + "' style='font-size:0.9em;'></span>"  
+            "</div></div>";
+    }
+
+    std::string page =
+        "<!DOCTYPE html><html lang='en'>"
+        "<head><meta charset='UTF-8'><title>Device Configuration Upload</title>"
+        "<style>"
+        "body{font-family:Arial,sans-serif;padding:24px;max-width:800px;margin:auto;background:#f8f9fa;}"
+        "h1{color:#2c3e50;}p{color:#555;}"
+        ".card{background:#fff;border-radius:8px;box-shadow:0 1px 6px rgba(0,0,0,0.10);"
+        "padding:18px 22px;margin:14px 0;}"
+        ".note{background:#fff3cd;border-left:4px solid #ffc107;padding:10px 14px;"
+        "border-radius:4px;margin-bottom:20px;font-size:0.9em;color:#856404;}"
+        ".btn-back{display:inline-block;margin-top:18px;padding:9px 22px;background:#3498db;"
+        "color:#fff;text-decoration:none;border-radius:5px;font-size:0.95em;}"
+        "</style></head><body>"
+        "<h1>&#9881; Device Configuration Upload</h1>"
+        "<div class='note'>&#8505; Upload these files once after the HTTPS server is up. "
+        "Files are written directly to the device filesystem. "
+        "Existing files will be overwritten.</div>"
+        + cards +
+        "<br/><a href='/' class='btn-back'>&#8592; Home</a>"
+        "<script>"
+        "async function uploadCfg(fid, dest, sid) {"
+        "  var fi = document.getElementById(fid);"
+        "  if (!fi.files.length) { alert('Select a file first'); return; }"
+        "  var st = document.getElementById(sid);"
+        "  st.textContent = '\u23f3 Uploading...';"
+        "  var text = await fi.files[0].text();"
+        "  var body = 'dest=' + encodeURIComponent(dest) + '&content=' + encodeURIComponent(text);"
+        "  try {"
+        "    var r = await fetch('/config-upload', {method:'POST',"
+        "      headers:{'Content-Type':'application/x-www-form-urlencoded'}, body: body});"
+        "    if (r.ok) { st.innerHTML = '&#9989; Uploaded'; st.style.color='#27ae60'; }"
+        "    else { st.innerHTML = '&#10060; Failed (' + r.status + ')'; st.style.color='#c0392b'; }"
+        "  } catch(e) { st.innerHTML = '&#10060; ' + e; st.style.color='#c0392b'; }"
+        "}"
+        "</script>"
+        "</body></html>";
+
+    return sendResponse(connection, page, MHD_HTTP_OK);
+}
+
+// ---------------------------------------------------------------------------
+// handleConfigUploadPost  –  POST /config-upload
+//   Writes the uploaded text to a whitelisted destination path on the device.
+// ---------------------------------------------------------------------------
+MHD_Result HttpsServer::handleConfigUploadPost(struct MHD_Connection* connection,
+                                                ConnectionInfo* con_info,
+                                                const char* upload_data,
+                                                size_t* upload_data_size)
+{
+    if (*upload_data_size > 0) {
+        con_info->createUploadData();
+        con_info->getUploadData()->append(upload_data, *upload_data_size);
+        *upload_data_size = 0;
+        return MHD_YES;
+    }
+
+    UploadData* body = con_info->getUploadData();
+    std::string body_str = (body && body->getSize() > 0)
+        ? std::string(body->getData(), body->getSize()) : "";
+
+    std::string dest    = getFormField(body_str, "dest");
+    std::string content = getFormField(body_str, "content");
+
+    // Strict whitelist — never write to an arbitrary path
+    static const char* const ALLOWED[] = {
+        "/etc/iot-gateway/firmware.conf",
+        "/etc/iot-gateway/blockchain.conf",
+        "/etc/googlehsmkey/hsm-pubkey.pem",
+        "/etc/rauc/system.conf",
+        "/etc/rauc/ca.cert.pem",
+        nullptr
+    };
+    bool allowed = false;
+    for (int i = 0; ALLOWED[i]; ++i)
+        if (dest == ALLOWED[i]) { allowed = true; break; }
+
+    if (!allowed)
+        return sendResponse(connection, "Invalid destination path", MHD_HTTP_BAD_REQUEST);
+    if (content.empty())
+        return sendResponse(connection, "Empty file content", MHD_HTTP_BAD_REQUEST);
+
+    // Create parent directory hierarchy
+    size_t slash = dest.rfind('/');
+    if (slash != std::string::npos && slash > 0) {
+        std::string dir = dest.substr(0, slash);
+        for (size_t i = 1; i <= dir.size(); ++i) {
+            if (i == dir.size() || dir[i] == '/') {
+                std::string sub = dir.substr(0, i);
+                ::mkdir(sub.c_str(), 0755);  // ignore EEXIST
+            }
+        }
+    }
+
+    std::ofstream ofs(dest, std::ios::binary | std::ios::trunc);
+    if (!ofs.is_open()) {
+        return sendResponse(connection,
+            "Cannot open " + dest + " for writing: " + strerror(errno),
+            MHD_HTTP_INTERNAL_SERVER_ERROR);
+    }
+    ofs.write(content.c_str(), static_cast<std::streamsize>(content.size()));
+    ofs.close();
+    chmod(dest.c_str(), 0640);  // owner rw, group r, world none
+
+    std::cout << "[ConfigUpload] Wrote " << content.size() << " bytes to " << dest << "\n";
+    addActivityLog("[CONFIG] Uploaded " + dest.substr(dest.rfind('/') + 1)
+                   + " (" + std::to_string(content.size()) + " bytes)");
+    return sendResponse(connection, "OK", MHD_HTTP_OK);
+}
+
 // Handle LED control request
 MHD_Result HttpsServer::handleLedControl(struct MHD_Connection* connection, const char* url) {
     std::cout << "[LED Control] Request received: " << url << std::endl;
@@ -2143,6 +2301,11 @@ MHD_Result HttpsServer::answerToConnection(void* cls, struct MHD_Connection* con
     // Handle POST /fw-update-trigger
     if (std::strcmp(method, "POST") == 0 && std::strcmp(url, "/fw-update-trigger") == 0) {
         return handleFirmwareTrigger(connection, con_info, upload_data, upload_data_size);
+    }
+
+    // Handle POST /config-upload
+    if (std::strcmp(method, "POST") == 0 && std::strcmp(url, "/config-upload") == 0) {
+        return handleConfigUploadPost(connection, con_info, upload_data, upload_data_size);
     }
 
     // Handle GET or other methods
