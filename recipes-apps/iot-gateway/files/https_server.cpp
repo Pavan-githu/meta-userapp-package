@@ -18,6 +18,7 @@
 #include <map>
 #include <cstdio>
 #include <ctime>
+#include <sys/stat.h>
 #include <openssl/evp.h>
 
 // ---------------------------------------------------------------------------
