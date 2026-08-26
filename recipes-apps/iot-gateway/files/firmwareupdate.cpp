@@ -61,7 +61,7 @@ const char* firmwareStatusLabel(FirmwareUpdateStatus s)
 }
 
 // ---------------------------------------------------------------------------
-// verifyLdrHeader  –  validate the 116-byte header of a .ldr firmware image
+// verifyLdrHeader  –  validate the 48-byte header of a .ldr firmware image
 // ---------------------------------------------------------------------------
 bool FirmwareUpdateManager::verifyLdrHeader(const std::string& ldr_path,
                                              FirmwareHeader&    header_out,
@@ -100,27 +100,16 @@ bool FirmwareUpdateManager::verifyLdrHeader(const std::string& ldr_path,
                     + static_cast<char>(hdr.magic[3]) + "'";
         return false;
     }
-
-    // ── 2. Header version ─────────────────────────────────────────────────
-    if (hdr.hdr_version != LDR_HDR_VERSION) {
-        error_out = "Unsupported header version: "
-                    + std::to_string(hdr.hdr_version)
-                    + " (expected " + std::to_string(LDR_HDR_VERSION) + ")";
+    // ── 2. File extension ──────────────────────────────────────────────────
+    if (!isLdrFile(ldr_path)) {
+        error_out = "File does not have .ldr extension: " + ldr_path;
         return false;
     }
 
-    // ── 3. Header size field ──────────────────────────────────────────────
-    if (hdr.hdr_size != LDR_HDR_SIZE) {
-        error_out = "Unexpected hdr_size field: "
-                    + std::to_string(hdr.hdr_size)
-                    + " (expected " + std::to_string(LDR_HDR_SIZE) + ")";
-        return false;
-    }
-
-    // ── 4. CRC32 of header bytes 0..111 ───────────────────────────────────
-    //  hdr_crc32 sits at offset 112 (LDR_HDR_SIZE - sizeof(uint32_t));
+    // ── 3. CRC32 of header bytes 0..43 ───────────────────────────────────
+    //  hdr_crc32 sits at offset 44 (LDR_HDR_SIZE - sizeof(uint32_t));
     //  it is NOT included in the digest.
-    const size_t   covered_len = LDR_HDR_SIZE - sizeof(uint32_t); // 112
+    const size_t   covered_len = LDR_HDR_SIZE - sizeof(uint32_t); // 44
     const uint32_t computed    = crc32Compute(
                                      reinterpret_cast<const uint8_t*>(&hdr),
                                      covered_len);
@@ -133,45 +122,8 @@ bool FirmwareUpdateManager::verifyLdrHeader(const std::string& ldr_path,
         return false;
     }
 
-    // ── 5. fw_version null-termination ────────────────────────────────────
-    bool fw_ver_ok = false;
-    for (int i = 0; i < 32; ++i)
-        if (hdr.fw_version[i] == '\0') { fw_ver_ok = true; break; }
-    if (!fw_ver_ok) {
-        error_out = "fw_version field is not null-terminated within 32 bytes";
-        return false;
-    }
-
-    // ── 6. timestamp null-termination ─────────────────────────────────────
-    bool ts_ok = false;
-    for (int i = 0; i < 32; ++i)
-        if (hdr.timestamp[i] == '\0') { ts_ok = true; break; }
-    if (!ts_ok) {
-        error_out = "timestamp field is not null-terminated within 32 bytes";
-        return false;
-    }
-
-    // ── 7. payload_size consistent with actual file size ──────────────────
-    //  Accept both bare ( header + payload ) and RPIS-tailed
-    //  ( header + payload + RPIS_TAIL_SIZE ) variants.
-    const uint64_t base_total  = static_cast<uint64_t>(LDR_HDR_SIZE) + hdr.payload_size;
-    const uint64_t tail_total  = base_total + RPIS_TAIL_SIZE;
-    const uint64_t actual_size = static_cast<uint64_t>(file_size);
-    if (actual_size != base_total && actual_size != tail_total) {
-        error_out = "File size mismatch: header declares payload of "
-                    + std::to_string(hdr.payload_size)
-                    + " bytes (expected file size " + std::to_string(base_total)
-                    + " or " + std::to_string(tail_total)
-                    + "), but actual file is "
-                    + std::to_string(actual_size) + " bytes";
-        return false;
-    }
-
     header_out = hdr;
-    std::cout << "[FirmwareUpdate] .ldr header valid:"
-              << " fw_version=" << hdr.fw_version
-              << " timestamp="  << hdr.timestamp
-              << " payload="    << hdr.payload_size << " bytes" << std::endl;
+    std::cout << "[FirmwareUpdate] .ldr header valid: payload=" << hdr.payload_size << " bytes" << std::endl;
     return true;
 }
 
@@ -279,15 +231,17 @@ bool FirmwareUpdateManager::startUpdate(const FirmwareUpdateConfig& config)
 void* FirmwareUpdateManager::updateThreadEntry(void* arg)
 {
     FirmwareUpdateManager* self = static_cast<FirmwareUpdateManager*>(arg);
-    FirmwareUpdateConfig cfg = self->m_active_config; // mutable copy – updated for .ldr
+    FirmwareUpdateConfig cfg = self->m_active_config;
     self->m_is_ldr_update = false;
+    std::string ldr_original_path;  // original .ldr path, kept alive until after HSM verify
 
     auto fail = [&](const std::string& msg) {
         self->setError(msg);
         self->m_status.store(FirmwareUpdateStatus::FAILED);
-        // Remove staging file if it exists
         if (!cfg.staging_path.empty())
             std::remove(cfg.staging_path.c_str());
+        if (!ldr_original_path.empty())
+            std::remove(ldr_original_path.c_str());
         self->m_thread_running = false;
         pthread_exit(nullptr);
     };
@@ -300,8 +254,10 @@ void* FirmwareUpdateManager::updateThreadEntry(void* arg)
         fail("Update cancelled by caller");
     }
 
-    // Step 1b: For .ldr firmware images, validate the binary header first
-    //          so that payload_size is known before HSM verification.
+    // Step 1b: Validate the .ldr header then immediately unpack the file:
+    //   strip the 116-byte RPIF header and 264-byte RPIS tail, writing the
+    //   bare .raucb payload to cfg.staging_path + ".raucb".
+    //   All subsequent steps (HSM, SHA-256, rauc) operate on that payload file.
     if (self->isLdrFile(cfg.staging_path)) {
         FirmwareHeader hdr;
         std::string    hdr_err;
@@ -309,7 +265,8 @@ void* FirmwareUpdateManager::updateThreadEntry(void* arg)
             fail(std::string("LDR header validation failed: ") + hdr_err);
         self->m_ldr_header    = hdr;
         self->m_is_ldr_update = true;
-        // Override expected_sha256 with the authoritative digest from the header
+
+        // Derive expected_sha256 from the authoritative digest stored in the header
         std::ostringstream hex;
         hex << std::hex;
         for (int i = 0; i < 32; ++i) {
@@ -317,17 +274,49 @@ void* FirmwareUpdateManager::updateThreadEntry(void* arg)
             hex << static_cast<unsigned int>(hdr.sha256[i]);
         }
         cfg.expected_sha256 = hex.str();
+
+        // Update paths before extraction so fail() can clean up both files
+        ldr_original_path = cfg.staging_path;
+        cfg.staging_path  = ldr_original_path + ".raucb";
+
+        // Extract exactly payload_size bytes starting at LDR_HDR_SIZE
+        {
+            std::ifstream src(ldr_original_path, std::ios::binary);
+            std::ofstream dst(cfg.staging_path,   std::ios::binary | std::ios::trunc);
+            if (!src || !dst)
+                fail("Cannot extract .ldr payload to: " + cfg.staging_path);
+            src.seekg(LDR_HDR_SIZE, std::ios::beg);
+            uint64_t remaining = hdr.payload_size;
+            char copy_buf[65536];
+            while (remaining > 0) {
+                size_t chunk = static_cast<size_t>(
+                    std::min(static_cast<uint64_t>(sizeof(copy_buf)), remaining));
+                src.read(copy_buf, static_cast<std::streamsize>(chunk));
+                size_t n = static_cast<size_t>(src.gcount());
+                if (n == 0) break;
+                dst.write(copy_buf, static_cast<std::streamsize>(n));
+                remaining -= n;
+            }
+        }
+        std::cout << "[FirmwareUpdate] .ldr payload extracted ("
+                  << hdr.payload_size << " bytes) \u2192 " << cfg.staging_path << std::endl;
     }
 
-    // Step 1.5: Verify Google Cloud HSM signature embedded in the 264-byte RPIS
-    //           tail of the .ldr file (bytes after the .raucb payload).
+    // Step 1.5: Verify Google Cloud HSM signature from the RPIS tail of the original
+    //           .ldr file.  The signature covers the same payload bytes now in
+    //           cfg.staging_path, so we pass ldr_original_path for the tail read.
     if (self->m_is_ldr_update && !cfg.hsm_pubkey_path.empty()) {
         std::string hsm_err;
         bool hsm_ok = FirmwareUpdateManager::verifyHsmSignatureFromLdr(
-            cfg.staging_path, cfg.hsm_pubkey_path,
+            ldr_original_path, cfg.hsm_pubkey_path,
             self->m_ldr_header.payload_size, hsm_err);
         if (!hsm_ok)
             fail(hsm_err);
+    }
+    // Original .ldr is no longer needed; payload lives in cfg.staging_path
+    if (!ldr_original_path.empty()) {
+        std::remove(ldr_original_path.c_str());
+        ldr_original_path.clear();
     }
 
     // Step 2: Verify
@@ -639,17 +628,8 @@ bool FirmwareUpdateManager::verifySha256(const FirmwareUpdateConfig& cfg)
         return false;
     }
 
-    // For .ldr images the SHA-256 covers only the payload region
-    // (bytes LDR_HDR_SIZE .. LDR_HDR_SIZE+payload_size-1), not the RPIS tail.
-    uint64_t bytes_remaining = UINT64_MAX;  // read to EOF for plain binaries
-    if (m_is_ldr_update) {
-        ifs.seekg(LDR_HDR_SIZE, std::ios::beg);
-        if (!ifs) {
-            setError("Failed to seek past .ldr header in: " + cfg.staging_path);
-            return false;
-        }
-        bytes_remaining = m_ldr_header.payload_size;
-    }
+    // staging_path is always the bare payload at this point (header/tail already stripped)
+    uint64_t bytes_remaining = UINT64_MAX;  // read to EOF
 
     // Compute digest incrementally
     EVP_MD_CTX* ctx = EVP_MD_CTX_new();
@@ -718,43 +698,8 @@ bool FirmwareUpdateManager::applyUpdate(const FirmwareUpdateConfig& cfg)
 {
     std::cout << "[FirmwareUpdate] Applying update to " << cfg.target_path << std::endl;
 
-    // For .ldr images, extract the payload (strip the 116-byte header) into a
-    // raw binary at staging_path + ".raw", then replace the staging file.
-    // This ensures only the executable payload is installed, not the header.
-    if (m_is_ldr_update) {
-        const std::string raw_path = cfg.staging_path + ".raw";
-        {
-            std::ifstream src(cfg.staging_path, std::ios::binary);
-            std::ofstream dst(raw_path, std::ios::binary | std::ios::trunc);
-            if (!src || !dst) {
-                setError("Cannot extract .ldr payload to: " + raw_path);
-                return false;
-            }
-            src.seekg(LDR_HDR_SIZE, std::ios::beg);
-            // Extract exactly payload_size bytes — stop before the RPIS tail
-            uint64_t remaining = m_ldr_header.payload_size;
-            char copy_buf[65536];
-            while (remaining > 0) {
-                size_t chunk = static_cast<size_t>(std::min((uint64_t)sizeof(copy_buf), remaining));
-                src.read(copy_buf, chunk);
-                size_t n = static_cast<size_t>(src.gcount());
-                if (n == 0) break;
-                dst.write(copy_buf, n);
-                remaining -= n;
-            }
-        }
-        std::remove(cfg.staging_path.c_str());
-        if (std::rename(raw_path.c_str(), cfg.staging_path.c_str()) != 0) {
-            setError(std::string("Failed to stage .ldr payload: ") + strerror(errno));
-            return false;
-        }
-        std::cout << "[FirmwareUpdate] .ldr payload extracted ("
-                  << m_ldr_header.payload_size << " bytes)" << std::endl;
-    }
-
-    // For .ldr updates the staging file is now a pure .raucb bundle.
-    // Hand it to the RAUC daemon which writes it to the inactive A/B slot,
-    // updates the U-Boot boot counter, and marks the slot for next boot.
+    // Payload was extracted from the .ldr in updateThreadEntry; cfg.staging_path is
+    // already the bare .raucb bundle — hand it directly to the RAUC daemon.
     if (m_is_ldr_update) {
         std::string cmd = "rauc install " + cfg.staging_path;
         std::cout << "[FirmwareUpdate] Running: " << cmd << std::endl;

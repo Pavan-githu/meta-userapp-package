@@ -68,15 +68,15 @@ struct FirmwareUpdateConfig {
 // ---------------------------------------------------------------------------
 // FirmwareHeader – binary header at byte offset 0 of every .ldr firmware image
 //
-// File layout:  [ FirmwareHeader (116 bytes) ][ payload (payload_size bytes) ]
+// File layout:  [ FirmwareHeader (48 bytes) ][ payload (payload_size bytes) ]
 //
-// hdr_crc32  covers bytes 0–111 (all header fields except hdr_crc32 itself).
+// hdr_crc32  covers bytes 0–43 (all header fields except hdr_crc32 itself).
 // sha256     is the raw 32-byte SHA-256 digest of the payload region only.
 // ---------------------------------------------------------------------------
 
 static constexpr uint8_t  LDR_MAGIC[4]    = {'R', 'P', 'I', 'F'};
 static constexpr uint16_t LDR_HDR_VERSION = 1;
-static constexpr uint16_t LDR_HDR_SIZE    = 116;  // sizeof(FirmwareHeader)
+static constexpr uint16_t LDR_HDR_SIZE    =  48;  // sizeof(FirmwareHeader)
 
 // RPIS tail appended after the .raucb payload: magic(4) + sig_len(2) + reserved(2) + sig(256)
 static constexpr uint8_t  RPIS_MAGIC[4]   = {'R', 'P', 'I', 'S'};
@@ -86,13 +86,9 @@ static constexpr uint16_t RPIS_SIG_MAX    = RPIS_TAIL_SIZE - RPIS_SIG_OFFSET;  /
 
 typedef struct __attribute__((packed)) {
     uint8_t  magic[4];        /* "RPIF"                              */
-    uint16_t hdr_version;     /* must be 1                           */
-    uint16_t hdr_size;        /* must be 116                         */
-    char     fw_version[32];  /* e.g. "v0.1.0\0..."                  */
-    char     timestamp[32];   /* e.g. "2026-06-29T16:36:52Z\0..."    */
     uint8_t  sha256[32];      /* raw SHA-256 digest of payload       */
     uint64_t payload_size;    /* byte count of the payload region    */
-    uint32_t hdr_crc32;       /* CRC32/ISO-HDLC of header[0..111]   */
+    uint32_t hdr_crc32;       /* CRC32/ISO-HDLC of header[0..43]    */
 } FirmwareHeader;
 
 // ---------------------------------------------------------------------------
@@ -158,15 +154,12 @@ public:
     static int compareSemver(const std::string& a, const std::string& b);
 
     // -----------------------------------------------------------------------
-    // Verify the 116-byte header of a .ldr firmware image.
+    // Verify the 48-byte header of a .ldr firmware image.
     //
     // Checks performed:
     //   1. magic bytes == "RPIF"
-    //   2. hdr_version == 1
-    //   3. hdr_size    == 116
-    //   4. CRC32/ISO-HDLC of header[0..111] matches hdr_crc32
-    //   5. fw_version and timestamp fields are null-terminated
-    //   6. payload_size is consistent with the actual file size
+    //   2. CRC32/ISO-HDLC of header[0..43] matches hdr_crc32
+    //   3. payload_size is consistent with the actual file size
     //
     // Returns true and populates header_out on success.
     // Returns false and populates error_out with a human-readable reason.
