@@ -81,10 +81,12 @@ static constexpr uint8_t  LDR_MAGIC[4]    = {'R', 'P', 'I', 'F'};
 static constexpr uint16_t LDR_HDR_VERSION = 1;
 static constexpr uint16_t LDR_HDR_SIZE    =  48;  // sizeof(FirmwareHeader)
 
-// RPIS tail appended after the .raucb payload: magic(4) + sig_len(2) + reserved(2) + sig(256)
+// RPIS tail appended after the .raucb payload: magic(4) + sig_alg(2) + sig_len(2) + sig(256)
 static constexpr uint8_t  RPIS_MAGIC[4]   = {'R', 'P', 'I', 'S'};
 static constexpr uint16_t RPIS_TAIL_SIZE  = 264;   // total bytes of the RPIS tail
-static constexpr uint16_t RPIS_SIG_OFFSET =   8;   // bytes before signature data within tail
+static constexpr uint16_t RPIS_SIG_ALG_OFFSET = 4; // offset of sig_alg field (1 = RSA_SIGN_PSS_2048_SHA256)
+static constexpr uint16_t RPIS_SIG_LEN_OFFSET = 6; // offset of sig_len field
+static constexpr uint16_t RPIS_SIG_OFFSET =   8;   // offset of signature bytes within tail
 static constexpr uint16_t RPIS_SIG_MAX    = RPIS_TAIL_SIZE - RPIS_SIG_OFFSET;  // 256
 
 typedef struct __attribute__((packed)) {

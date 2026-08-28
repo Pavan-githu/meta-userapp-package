@@ -539,8 +539,8 @@ bool FirmwareUpdateManager::downloadUrlToFile(const std::string& url,
 //
 //   RPIS tail layout (264 bytes, little-endian):
 //     [0:4]   magic "RPIS"
-//     [4:6]   uint16_t: signature length in bytes
-//     [6:8]   uint16_t: reserved (0)
+//     [4:6]   uint16_t: sig_alg  (1 = RSA_SIGN_PSS_2048_SHA256)
+//     [6:8]   uint16_t: sig_len  actual signature bytes used (≤ 256)
 //     [8:264] signature bytes (padded to 256 bytes)
 // ---------------------------------------------------------------------------
 bool FirmwareUpdateManager::verifyHsmSignatureFromLdr(const std::string& ldr_path,
@@ -579,11 +579,7 @@ bool FirmwareUpdateManager::verifyHsmSignatureFromLdr(const std::string& ldr_pat
 
     // ── Extract signature length and bytes ───────────────────────────────
     uint16_t sig_len = 0;
-    std::memcpy(&sig_len, tail + 4, sizeof(sig_len));  // little-endian
-    std::fprintf(stderr, "[FirmwareUpdate] RPIS tail[4]=0x%02x tail[5]=0x%02x => sig_len=%u  sig[0..3]=%02x%02x%02x%02x\n",
-                 tail[4], tail[5], (unsigned)sig_len,
-                 tail[RPIS_SIG_OFFSET], tail[RPIS_SIG_OFFSET+1],
-                 tail[RPIS_SIG_OFFSET+2], tail[RPIS_SIG_OFFSET+3]);
+    std::memcpy(&sig_len, tail + 6, sizeof(sig_len));  // sig_len is at offset 6; offset 4 is sig_alg
     if (sig_len == 0 || sig_len > RPIS_SIG_MAX) {
         error_out = "RPIS sig_len invalid: " + std::to_string(sig_len);
         return false;
@@ -640,10 +636,7 @@ bool FirmwareUpdateManager::verifyHsmSignatureFromLdr(const std::string& ldr_pat
     EVP_PKEY_free(pkey);
 
     if (ok != 1) {
-        char ossl_err[256] = {};
-        ERR_error_string_n(ERR_get_error(), ossl_err, sizeof(ossl_err));
-        error_out = std::string("RPIS HSM signature INVALID — .ldr payload not authentic (ok=")
-                    + std::to_string(ok) + ", openssl: " + ossl_err + ")";
+        error_out = "RPIS HSM signature INVALID — .ldr payload not authentic";
         return false;
     }
     std::cout << "[FirmwareUpdate] RPIS HSM signature verified OK (Google Cloud HSM)" << std::endl;
