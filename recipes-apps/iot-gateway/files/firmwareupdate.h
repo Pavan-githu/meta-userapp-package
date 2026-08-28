@@ -60,6 +60,9 @@ struct FirmwareUpdateConfig {
     std::string target_path;     // final installation path, e.g. /usr/bin/iot-gateway
     std::string backup_path;     // path for the previous binary (rollback)
     std::string version;         // version string of the new firmware (e.g. "1.2.3")
+    // Blockchain metadata sizes for post-download integrity checks (0 = skip check)
+    uint64_t    bc_ldr_size_bytes     = 0;  // expected size of the full .ldr file
+    uint64_t    bc_payload_size_bytes = 0;  // expected size of the extracted payload
     // HSM signature verification (optional — leave empty to skip)
     std::string hsm_pubkey_path; // path to Google HSM RSA/EC public key PEM on device
     std::string hsm_sig_url;     // HTTPS URL of the detached .sig file from the release server

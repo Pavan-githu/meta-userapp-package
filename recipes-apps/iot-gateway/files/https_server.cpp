@@ -1874,6 +1874,8 @@ MHD_Result HttpsServer::handleFirmwareTrigger(struct MHD_Connection* connection,
     cfg.backup_path     = backup;
     cfg.hsm_pubkey_path = fw_hsm_pubkey;
     cfg.hsm_sig_url     = info.download_url + ".sig";
+    cfg.bc_ldr_size_bytes     = info.final_image_size_bytes;  // full .ldr from blockchain
+    cfg.bc_payload_size_bytes = info.image_size_bytes;        // payload (.raucb) from blockchain
 
     bool started = fw_manager->startUpdate(cfg);
     if (!started) {

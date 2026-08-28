@@ -14,6 +14,7 @@
 #include <openssl/evp.h>
 #include <openssl/err.h>
 #include <openssl/pem.h>
+#include <openssl/rsa.h>
 #include <vector>
 
 // ---------------------------------------------------------------------------
@@ -100,13 +101,7 @@ bool FirmwareUpdateManager::verifyLdrHeader(const std::string& ldr_path,
                     + static_cast<char>(hdr.magic[3]) + "'";
         return false;
     }
-    // ── 2. File extension ──────────────────────────────────────────────────
-    if (!isLdrFile(ldr_path)) {
-        error_out = "File does not have .ldr extension: " + ldr_path;
-        return false;
-    }
-
-    // ── 3. CRC32 of header bytes 0..43 ───────────────────────────────────
+    // ── 2. CRC32 of header bytes 0..43 ───────────────────────────────────
     //  hdr_crc32 sits at offset 44 (LDR_HDR_SIZE - sizeof(uint32_t));
     //  it is NOT included in the digest.
     const size_t   covered_len = LDR_HDR_SIZE - sizeof(uint32_t); // 44
@@ -247,24 +242,30 @@ void* FirmwareUpdateManager::updateThreadEntry(void* arg)
     };
 
     // Step 1: Download
+    // Carry the .ldr extension from the URL to the staging file so that
+    // isLdrFile() works on the staged path without relying on magic-byte probing.
+    if (isLdrFile(cfg.url) && !isLdrFile(cfg.staging_path))
+        cfg.staging_path += ".ldr";
+
     if (!self->downloadFirmware(cfg))
         fail(self->getLastError());
+
+    // Verify downloaded .ldr file size matches blockchain metadata
+    if (cfg.bc_ldr_size_bytes > 0) {
+        struct stat ldr_st;
+        if (::stat(cfg.staging_path.c_str(), &ldr_st) == 0 &&
+            static_cast<uint64_t>(ldr_st.st_size) != cfg.bc_ldr_size_bytes) {
+            fail("Downloaded .ldr size mismatch: blockchain=" +
+                 std::to_string(cfg.bc_ldr_size_bytes) +
+                 " actual=" + std::to_string(ldr_st.st_size));
+        }
+    }
 
     if (self->m_cancel_requested.load()) {
         fail("Update cancelled by caller");
     }
 
-    // Detect .ldr by RPIF magic bytes — staging_path may not carry a .ldr extension
-    auto isLdrByMagic = [&]() -> bool {
-        std::ifstream f(cfg.staging_path, std::ios::binary);
-        if (!f.is_open()) return false;
-        uint8_t magic[4] = {};
-        f.read(reinterpret_cast<char*>(magic), 4);
-        return static_cast<size_t>(f.gcount()) == 4 &&
-               std::memcmp(magic, LDR_MAGIC, sizeof(LDR_MAGIC)) == 0;
-    };
-
-    if (isLdrByMagic()) {
+    if (self->isLdrFile(cfg.staging_path)) {
         FirmwareHeader hdr;
         std::string    hdr_err;
         if (!FirmwareUpdateManager::verifyLdrHeader(cfg.staging_path, hdr, hdr_err))
@@ -272,14 +273,29 @@ void* FirmwareUpdateManager::updateThreadEntry(void* arg)
         self->m_ldr_header    = hdr;
         self->m_is_ldr_update = true;
 
-        // Derive expected_sha256 from the authoritative digest stored in the header
-        std::ostringstream hex;
-        hex << std::hex;
-        for (int i = 0; i < 32; ++i) {
-            hex.width(2); hex.fill('0');
-            hex << static_cast<unsigned int>(hdr.sha256[i]);
+        // Verify extracted payload size matches blockchain metadata
+        if (cfg.bc_payload_size_bytes > 0 &&
+            hdr.payload_size != cfg.bc_payload_size_bytes) {
+            fail("Payload size mismatch: blockchain=" +
+                 std::to_string(cfg.bc_payload_size_bytes) +
+                 " header=" + std::to_string(hdr.payload_size));
         }
-        cfg.expected_sha256 = hex.str();
+
+        // Convert hdr.sha256 to hex and verify it matches the blockchain metadata hash.
+        // This ensures the RPIF header was not tampered with after the blockchain record was made.
+        std::ostringstream hdr_hex;
+        hdr_hex << std::hex;
+        for (int i = 0; i < 32; ++i) {
+            hdr_hex.width(2); hdr_hex.fill('0');
+            hdr_hex << static_cast<unsigned int>(hdr.sha256[i]);
+        }
+        std::string hdr_hash = hdr_hex.str();
+        std::string bc_hash  = cfg.expected_sha256;
+        for (char& c : bc_hash) c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
+        if (hdr_hash != bc_hash)
+            fail("RPIF header sha256 does not match blockchain metadata hash:\n"
+                 "  header   : " + hdr_hash + "\n"
+                 "  blockchain: " + bc_hash);
 
         // Update paths before extraction so fail() can clean up both files
         ldr_original_path = cfg.staging_path;
@@ -581,9 +597,16 @@ bool FirmwareUpdateManager::verifyHsmSignatureFromLdr(const std::string& ldr_pat
     EVP_MD_CTX* ctx = EVP_MD_CTX_new();
     if (!ctx) { EVP_PKEY_free(pkey); error_out = "EVP_MD_CTX_new() failed"; return false; }
 
-    if (EVP_DigestVerifyInit(ctx, nullptr, EVP_sha256(), nullptr, pkey) != 1) {
+    EVP_PKEY_CTX* pkctx = nullptr;
+    if (EVP_DigestVerifyInit(ctx, &pkctx, EVP_sha256(), nullptr, pkey) != 1) {
         EVP_MD_CTX_free(ctx); EVP_PKEY_free(pkey);
         error_out = "EVP_DigestVerifyInit failed"; return false;
+    }
+    // Match Google Cloud KMS RSA_SIGN_PSS_2048_SHA256: PSS padding, salt = digest length
+    if (EVP_PKEY_CTX_set_rsa_padding(pkctx, RSA_PKCS1_PSS_PADDING) != 1 ||
+        EVP_PKEY_CTX_set_rsa_pss_saltlen(pkctx, RSA_PSS_SALTLEN_DIGEST) != 1) {
+        EVP_MD_CTX_free(ctx); EVP_PKEY_free(pkey);
+        error_out = "Failed to set RSA-PSS padding parameters"; return false;
     }
 
     // Stream exactly payload_size bytes starting at LDR_HDR_SIZE
