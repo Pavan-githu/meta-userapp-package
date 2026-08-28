@@ -580,6 +580,10 @@ bool FirmwareUpdateManager::verifyHsmSignatureFromLdr(const std::string& ldr_pat
     // ── Extract signature length and bytes ───────────────────────────────
     uint16_t sig_len = 0;
     std::memcpy(&sig_len, tail + 4, sizeof(sig_len));  // little-endian
+    std::fprintf(stderr, "[FirmwareUpdate] RPIS tail[4]=0x%02x tail[5]=0x%02x => sig_len=%u  sig[0..3]=%02x%02x%02x%02x\n",
+                 tail[4], tail[5], (unsigned)sig_len,
+                 tail[RPIS_SIG_OFFSET], tail[RPIS_SIG_OFFSET+1],
+                 tail[RPIS_SIG_OFFSET+2], tail[RPIS_SIG_OFFSET+3]);
     if (sig_len == 0 || sig_len > RPIS_SIG_MAX) {
         error_out = "RPIS sig_len invalid: " + std::to_string(sig_len);
         return false;
@@ -636,7 +640,10 @@ bool FirmwareUpdateManager::verifyHsmSignatureFromLdr(const std::string& ldr_pat
     EVP_PKEY_free(pkey);
 
     if (ok != 1) {
-        error_out = "RPIS HSM signature INVALID — .ldr payload not authentic";
+        char ossl_err[256] = {};
+        ERR_error_string_n(ERR_get_error(), ossl_err, sizeof(ossl_err));
+        error_out = std::string("RPIS HSM signature INVALID — .ldr payload not authentic (ok=")
+                    + std::to_string(ok) + ", openssl: " + ossl_err + ")";
         return false;
     }
     std::cout << "[FirmwareUpdate] RPIS HSM signature verified OK (Google Cloud HSM)" << std::endl;
