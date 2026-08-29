@@ -33,6 +33,7 @@
 #include <atomic>
 #include <pthread.h>
 #include <cstdint>
+#include <curl/curl.h>
 
 // ---------------------------------------------------------------------------
 // FirmwareUpdateStatus – lifecycle states for the background update thread
