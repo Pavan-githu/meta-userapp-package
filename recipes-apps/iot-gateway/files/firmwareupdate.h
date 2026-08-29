@@ -150,6 +150,7 @@ public:
     FirmwareUpdateStatus getStatus() const { return m_status.load(); }
     std::string          getLastError() const;
     std::string          getCurrentVersion() const { return m_current_version; }
+    int                  getDownloadProgress() const { return m_download_progress.load(); }
 
     // -----------------------------------------------------------------------
     // Compare two semver strings (MAJOR.MINOR.PATCH).
@@ -192,6 +193,9 @@ private:
     // CURL write callback
     static size_t curlWriteCallback(void* ptr, size_t size,
                                     size_t nmemb, void* userdata);
+    // CURL transfer progress callback — updates m_download_progress (0-100)
+    static int curlProgressCallback(void* userdata, curl_off_t dltotal, curl_off_t dlnow,
+                                    curl_off_t ultotal, curl_off_t ulnow);
 
     // Internal helpers
     void setError(const std::string& msg);
@@ -223,6 +227,7 @@ private:
 
     std::atomic<bool>         m_cancel_requested;
     std::atomic<FirmwareUpdateStatus> m_status;
+    std::atomic<int>          m_download_progress;  // 0-100 during DOWNLOADING, -1 if unknown
 
     // Guarded by m_mutex
     std::string               m_last_error;

@@ -1564,6 +1564,48 @@ MHD_Result HttpsServer::handleOtpPost(struct MHD_Connection* connection,
 }
 
 // ---------------------------------------------------------------------------
+// handleFirmwareProgress  –  GET /fw-progress
+//   Returns a JSON object with the current firmware update status and download
+//   progress percentage so the browser's progress bar can poll it.
+// ---------------------------------------------------------------------------
+MHD_Result HttpsServer::handleFirmwareProgress(struct MHD_Connection* connection)
+{
+    FirmwareUpdateManager* fw = fw_manager;  // global set by firmwareUpdateThread
+    std::string status_str = "IDLE";
+    int  progress = 0;
+    bool done     = false;
+
+    if (fw) {
+        FirmwareUpdateStatus st = fw->getStatus();
+        status_str = firmwareStatusLabel(st);
+        switch (st) {
+            case FirmwareUpdateStatus::DOWNLOADING:
+                progress = fw->getDownloadProgress();
+                if (progress < 0) progress = 0;
+                break;
+            case FirmwareUpdateStatus::VERIFYING:  progress = 100; break;
+            case FirmwareUpdateStatus::APPLYING:   progress = 100; break;
+            case FirmwareUpdateStatus::SUCCESS:    progress = 100; done = true; break;
+            case FirmwareUpdateStatus::FAILED:     progress = 0;   done = true; break;
+            default: progress = 0; break;
+        }
+    }
+
+    std::string json = "{\"status\":\"" + status_str + "\","
+                       "\"progress\":" + std::to_string(progress) + ","
+                       "\"done\":"     + (done ? "true" : "false") + ","
+                       "\"error\":\""  + (fw ? fw->getLastError() : "") + "\"}";
+
+    struct MHD_Response* resp = MHD_create_response_from_buffer(
+        json.size(), const_cast<char*>(json.c_str()), MHD_RESPMEM_MUST_COPY);
+    MHD_add_response_header(resp, "Content-Type", "application/json");
+    MHD_add_response_header(resp, "Cache-Control", "no-store");
+    MHD_Result ret = MHD_queue_response(connection, MHD_HTTP_OK, resp);
+    MHD_destroy_response(resp);
+    return ret;
+}
+
+// ---------------------------------------------------------------------------
 // handleFirmwareCheck  –  GET /fw-check
 //   Displays the full blockchain access report: node connectivity, OEM/fleet
 //   approval chain, hash/version comparison, and install permission decision.
@@ -1889,12 +1931,46 @@ MHD_Result HttpsServer::handleFirmwareTrigger(struct MHD_Connection* connection,
     addActivityLog("[FIRMWARE] OTA triggered via dashboard → " + info.firmware_version +
                    " approval=" + approvalStageLabel(info.approval_stage));
     return sendResponse(connection,
-        "<!DOCTYPE html><html><body style='font-family:Arial;padding:24px;'>"
-        "<h1>&#128197; Firmware Update Started</h1>"
-        "<p>Downloading and verifying firmware <strong>" + info.firmware_version + "</strong>.</p>"
-        "<p>Steps: download → Google HSM signature verify → LDR header validate → SHA-256 check → atomic install.</p>"
-        "<p>The device will reboot automatically once the update is applied.</p>"
-        "<p><a href='/status'>&#128202; View System Status</a></p>"
+        "<!DOCTYPE html><html><head><meta charset='UTF-8'>"
+        "<title>Firmware Update</title>"
+        "<style>"
+        "body{font-family:Arial,sans-serif;padding:24px;max-width:640px;margin:0 auto;}"
+        ".bar-wrap{background:#e0e0e0;border-radius:8px;height:28px;overflow:hidden;margin:16px 0;}"
+        ".bar{height:100%;background:linear-gradient(90deg,#1976d2,#42a5f5);width:0%;transition:width 0.4s;border-radius:8px;}"
+        ".status{font-size:1.1em;margin:8px 0;} .pct{font-weight:bold;}"
+        ".done-ok{color:#2e7d32;font-size:1.2em;font-weight:bold;}"
+        ".done-err{color:#c62828;font-size:1.2em;font-weight:bold;}"
+        ".btn{display:inline-block;padding:8px 18px;background:#1976d2;color:#fff;border-radius:6px;"
+        "     text-decoration:none;margin-top:16px;}"
+        "</style></head><body>"
+        "<h1>&#128197; Firmware Update in Progress</h1>"
+        "<p>Installing <strong>" + info.firmware_version + "</strong></p>"
+        "<p class='status'>Status: <span id='st'>Downloading...</span></p>"
+        "<div class='bar-wrap'><div class='bar' id='bar'></div></div>"
+        "<p><span class='pct' id='pct'>0%</span> &mdash; "
+        "<small>download &rarr; HSM verify &rarr; SHA-256 &rarr; RAUC install</small></p>"
+        "<div id='msg'></div>"
+        "<script>"
+        "var tid=setInterval(function(){"
+        "  fetch('/fw-progress').then(function(r){return r.json();}).then(function(d){"
+        "    document.getElementById('st').textContent=d.status;"
+        "    var p=(d.status==='VERIFYING'||d.status==='APPLYING')?100:d.progress;"
+        "    document.getElementById('bar').style.width=p+'%';"
+        "    document.getElementById('pct').textContent=p+'%';"
+        "    if(d.done){"
+        "      clearInterval(tid);"
+        "      var m=document.getElementById('msg');"
+        "      if(d.status==='SUCCESS'){"
+        "        m.innerHTML='<p class=\"done-ok\">&#10003; Update applied! Device will reboot.</p>"
+        "<a class=\"btn\" href=\"/status\">&#8592; System Status</a>';"
+        "      } else {"
+        "        m.innerHTML='<p class=\"done-err\">&#10007; Update failed: '+d.error+'</p>"
+        "<a class=\"btn\" href=\"/fw-check\">&#8635; Retry</a>';"
+        "      }"
+        "    }"
+        "  });"
+        "},1000);"
+        "</script>"
         "</body></html>",
         MHD_HTTP_OK);
 }
@@ -2324,6 +2400,11 @@ MHD_Result HttpsServer::answerToConnection(void* cls, struct MHD_Connection* con
         // Firmware update check endpoint
         if (std::strcmp(url, "/fw-check") == 0) {
             return handleFirmwareCheck(connection);
+        }
+
+        // Live download/install progress (polled by the progress bar page)
+        if (std::strcmp(url, "/fw-progress") == 0) {
+            return handleFirmwareProgress(connection);
         }
         
         // Default GET handler

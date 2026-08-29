@@ -142,6 +142,7 @@ FirmwareUpdateManager::FirmwareUpdateManager(const std::string& current_binary_p
     , m_cancel_requested(false)
     , m_is_ldr_update(false)
     , m_status(FirmwareUpdateStatus::IDLE)
+    , m_download_progress(-1)
 {
     pthread_mutex_init(&m_mutex, nullptr);
     std::cout << "[FirmwareUpdate] Manager initialized. Current version: "
@@ -373,6 +374,16 @@ size_t FirmwareUpdateManager::curlWriteCallback(void* ptr, size_t size,
     return std::fwrite(ptr, size, nmemb, fp);
 }
 
+// CURL progress callback: maps bytes downloaded to 0-100 percent
+int FirmwareUpdateManager::curlProgressCallback(void* userdata, curl_off_t dltotal,
+                                                curl_off_t dlnow, curl_off_t, curl_off_t)
+{
+    FirmwareUpdateManager* self = static_cast<FirmwareUpdateManager*>(userdata);
+    if (dltotal > 0)
+        self->m_download_progress.store(static_cast<int>(dlnow * 100 / dltotal));
+    return 0;  // non-zero cancels the transfer
+}
+
 bool FirmwareUpdateManager::downloadFirmware(const FirmwareUpdateConfig& cfg)
 {
     std::cout << "[FirmwareUpdate] Downloading from " << cfg.url << std::endl;
@@ -403,7 +414,10 @@ bool FirmwareUpdateManager::downloadFirmware(const FirmwareUpdateConfig& cfg)
     curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 10L);
     curl_easy_setopt(curl, CURLOPT_TIMEOUT,        300L);
     // Progress: allow cancel check via XFERINFOFUNCTION
-    curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
+    curl_easy_setopt(curl, CURLOPT_NOPROGRESS,       0L);
+    curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, curlProgressCallback);
+    curl_easy_setopt(curl, CURLOPT_XFERINFODATA,     this);
+    m_download_progress.store(0);
 
     CURLcode res = curl_easy_perform(curl);
 

@@ -189,6 +189,9 @@ private:
     // GET /fw-check  — queries blockchain metadata, compares hash/version/approval
     static MHD_Result handleFirmwareCheck(struct MHD_Connection* connection);
 
+    // GET /fw-progress  — returns JSON {status,progress,done,error} for the progress bar
+    static MHD_Result handleFirmwareProgress(struct MHD_Connection* connection);
+
     // POST /fw-update-trigger  — validates eligibility then calls fw_manager->startUpdate()
     static MHD_Result handleFirmwareTrigger(struct MHD_Connection* connection,
                                              ConnectionInfo* con_info,
